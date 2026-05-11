@@ -1,6 +1,12 @@
 ## [v0.0.1] – 2026-05-11
 
 ### Commits
+- chore: initial commit — Pizza Trainer Installer
+
+
+## [v0.0.1] – 2026-05-11
+
+### Commits
 - chore: initial commit — scripts, Go orchestrator, CI/CD, README
 
 
