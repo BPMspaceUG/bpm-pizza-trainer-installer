@@ -1,0 +1,270 @@
+# Pizza Trainer Installer
+
+Bootstrap scripts and Go orchestrator (`pizza-trainer`) for the Pizza Trainer environment.
+
+---
+
+## Download
+
+Pre-built packages (binary + scripts bundled) are available on the [Releases page](https://github.com/BPMspaceUG/bpm-pizza-trainer-installer/releases).
+
+| Package | Platform |
+|---------|----------|
+| `windows.zip` | Windows 10/11 — `pizza-trainer.exe`, all `.ps1` scripts, `launch.bat`, `packages.winget.json` |
+| `linux-amd64.zip` | Linux x86-64 — `pizza-trainer`, all `.sh` scripts |
+| `linux-arm64.zip` | Linux ARM64 |
+| `macos-intel.zip` | macOS Intel |
+| `macos-arm64.zip` | macOS Apple Silicon |
+
+Unzip the package for your platform and run `pizza-trainer` (or `pizza-trainer.exe` on Windows) from the extracted folder.
+
+> The `go-orchestrator/dist/` directory is gitignored — download packages from the Releases page, not from a clone of this repo.
+
+---
+
+## Quick start
+
+**Windows — `pizza-trainer` (browser UI + system tray):**
+
+```powershell
+.\pizza-trainer.exe
+```
+
+**Windows — scripts (GUI or terminal):**
+
+```powershell
+launch.bat                          # double-click launcher
+.\00-setup.ps1                      # WinForms GUI
+.\00-setup.ps1 -NoGui               # terminal menu
+```
+
+**Linux / WSL / macOS — `pizza-trainer`:**
+
+```bash
+./pizza-trainer
+```
+
+**Linux / WSL / macOS — scripts:**
+
+```bash
+bash 00-setup.sh
+```
+
+---
+
+## Go orchestrator (`pizza-trainer`)
+
+`pizza-trainer` is a cross-platform CLI that wraps the stabilized setup scripts with a browser control panel and (on Windows) a system tray icon.
+
+Running with no arguments auto-detects the workspace root, opens the browser control panel, and on Windows adds a system tray icon with **Open Control Panel**, **Reopen Browser**, and **Exit**.
+
+### All commands
+
+```
+pizza-trainer [command] [flags]
+```
+
+| Command | Description |
+|---------|-------------|
+| *(no command)* | Browser UI + Windows system tray |
+| `ui` | Browser control panel (explicit, configurable) |
+| `preflight` | Run the platform-specific preflight script |
+| `setup` / `full-setup` | Non-interactive full setup (packages + repos) |
+| `packages-status` | Show installed/missing package status |
+| `packages-install` | Install all missing packages |
+| `repos-status` | Show repository clone status |
+| `repos-sync` | Clone or pull repositories |
+| `repos-cleanup` | Selectively clean or remove repositories |
+| `wsl-ssh` | Run the Windows WSL2 / OpenSSH setup script |
+| `coding-agents` | Run the Windows VS Code + CAC setup script |
+| `trainer` | Run the pizza-ml trainer setup |
+| `validate` | Alias for `preflight` |
+| `checkpoint-path` | Print the default trainer checkpoint path |
+| `snapshot-save` | Save a dated fallback snapshot |
+| `snapshot-restore` | Restore scripts from fallback or a named snapshot |
+| `snapshot-list` | List dated fallback snapshots |
+
+### Common flags
+
+Most commands accept `--root <path>` (workspace root, defaults to `.`) and:
+
+- `--fallback` — run against `fallback-scripts/` instead of the active top-level scripts
+- `--snapshot <timestamp>` — run against `fallback-scripts/snapshots/<timestamp>`
+- `--skip-preflight` — skip preflight checks (setup, full-setup)
+- `--dry-run` — preview what would happen without making changes (setup, repos-sync, repos-cleanup)
+
+### `repos-cleanup` flags
+
+```
+pizza-trainer repos-cleanup --root .. --remove-modules
+pizza-trainer repos-cleanup --root .. --remove-modules --git-clean --reinstall
+pizza-trainer repos-cleanup --root .. --remove-python-env    # pizza-ml venv + data teardown
+pizza-trainer repos-cleanup --root .. --remove-repos          # full teardown (deletes clones)
+pizza-trainer repos-cleanup --root .. --remove-modules --dry-run
+```
+
+### `ui` flags
+
+```
+pizza-trainer ui --root .. --addr 127.0.0.1:8080 --open=false
+```
+
+### Examples
+
+```
+pizza-trainer
+pizza-trainer ui --root ..
+pizza-trainer preflight --root ..
+pizza-trainer preflight --root .. --fallback
+pizza-trainer setup --root ..
+pizza-trainer setup --root .. --snapshot 20260403-214500
+pizza-trainer trainer --root .. --resume
+pizza-trainer packages-status --root ..
+pizza-trainer repos-status --root ..
+pizza-trainer repos-cleanup --root .. --remove-modules --dry-run
+pizza-trainer repos-cleanup --root .. --remove-repos
+pizza-trainer snapshot-save --root ..
+pizza-trainer snapshot-list --root ..
+pizza-trainer snapshot-restore --root .. --snapshot 20260403-214500
+```
+
+Build from source:
+
+```
+go run ./cmd/pizza-trainer
+go run ./cmd/pizza-trainer ui --root ..
+```
+
+---
+
+## Script order
+
+| Script | Platform | Notes |
+|--------|----------|-------|
+| `00-preflight.ps1` / `00-preflight.sh` | All | Run automatically by `00-setup.*`; can be run standalone |
+| `00-setup.ps1` / `00-setup.sh` | All | Primary entry point — installs packages, syncs repos, runs later steps |
+| `01-setup-wsl-ssh.ps1` | Windows (Admin) | Enables WSL2, installs Ubuntu, configures OpenSSH Server, opens port 22 |
+| `02-setup-coding-agents.ps1` | Windows | VS Code AI extension set and CAC CLI installation |
+| `03-setup-pizza-ml-trainer.ps1` / `.sh` | All | Python venv, Food-101 dataset, PyTorch, smoke test |
+
+## Script entry points
+
+### Windows
+
+```powershell
+.\00-setup.ps1                                  # GUI (default)
+.\00-setup.ps1 -NoGui                           # terminal menu
+.\00-setup.ps1 -NoGui -SkipPreflight            # skip preflight
+.\00-setup.ps1 -Action full-setup               # non-interactive full setup
+.\00-setup.ps1 -Action repos-cleanup -RemoveModules -GitClean
+```
+
+Available `-Action` values: `packages-status`, `packages-install`, `repos-status`, `repos-sync`, `repos-cleanup`, `full-setup`
+
+### Linux / WSL / macOS
+
+```bash
+bash 00-setup.sh
+bash 00-setup.sh --skip-preflight
+bash 00-setup.sh --action full-setup
+```
+
+### Preflight only
+
+```powershell
+.\00-preflight.ps1
+```
+
+```bash
+bash 00-preflight.sh
+```
+
+Preflight reports OS context, disk space, key tools, network reachability, and WSL state. It does not change the machine.
+
+---
+
+## Trainer checkpoint resume
+
+Script 03 supports checkpoint-based resume for long runs:
+
+```powershell
+.\03-setup-pizza-ml-trainer.ps1 -Resume
+.\03-setup-pizza-ml-trainer.ps1 -ResetCheckpoint
+```
+
+```bash
+bash 03-setup-pizza-ml-trainer.sh --resume
+bash 03-setup-pizza-ml-trainer.sh --reset-checkpoint
+```
+
+Default checkpoint location:
+
+- Windows: `$HOME\.pizza-trainer\03-setup-pizza-ml-trainer.json`
+- Linux / WSL / macOS: `$HOME/.pizza-trainer/03-setup-pizza-ml-trainer.state`
+
+---
+
+## Fallback snapshot system
+
+A fallback copy of the current script set is stored under `fallback-scripts/`. Dated snapshots are saved to `fallback-scripts/snapshots/<timestamp>/`.
+
+### Save a snapshot
+
+```powershell
+.\98-save-fallback-snapshot.ps1
+```
+
+```bash
+bash 98-save-fallback-snapshot.sh
+```
+
+Refreshes the root `fallback-scripts/` copy and writes a new dated snapshot.
+
+### Restore from a snapshot
+
+```powershell
+.\99-restore-fallback-snapshot.ps1
+.\99-restore-fallback-snapshot.ps1 -Snapshot 20260403-214500
+```
+
+```bash
+bash 99-restore-fallback-snapshot.sh
+bash 99-restore-fallback-snapshot.sh 20260403-214500
+```
+
+### Run against fallback scripts via pizza-trainer
+
+```
+pizza-trainer preflight --root .. --fallback
+pizza-trainer setup --root .. --fallback
+pizza-trainer trainer --root .. --fallback
+pizza-trainer preflight --root .. --snapshot 20260403-214500
+pizza-trainer setup --root .. --snapshot 20260403-214500
+pizza-trainer trainer --root .. --snapshot 20260403-214500
+```
+
+---
+
+## Minimum requirements
+
+- **Disk space:** at least 30 GB free (Food-101 dataset + Python dependencies)
+- **Internet:** required for package installation, repo cloning, and Python package downloads
+- `git` must be on PATH for repo cloning
+- `winget` required for Windows package installation
+- VS Code CLI (`code`) required only for script 02 to install extensions automatically
+
+## Supported platforms
+
+- Windows 10/11 — PowerShell flow + WinForms GUI
+- Linux, WSL2, macOS — shell flow
+- `01-setup-wsl-ssh.ps1` is Windows-only and requires Administrator rights
+
+## Security notes
+
+These behaviors are acceptable only in a controlled training environment:
+
+- `01-setup-wsl-ssh.ps1` removes the WSL user password and grants passwordless sudo
+- `01-setup-wsl-ssh.ps1` installs and starts Windows OpenSSH Server and opens inbound port 22
+- Some install paths use remote installer scripts fetched over HTTPS
+
+Review these before running outside an isolated lab.

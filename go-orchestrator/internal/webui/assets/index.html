@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MITSM Training Control Panel</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">MITSM Training</p>
+      <h1>Control Panel</h1>
+      <p class="lede">A lightweight local dashboard for trainers and attendees. It runs on the same machine as the setup scripts and drives the Go orchestrator underneath.</p>
+    </section>
+
+    <section class="status-grid">
+      <article class="card stat-card">
+        <span class="label">Platform</span>
+        <strong id="platformValue">-</strong>
+      </article>
+      <article class="card stat-card">
+        <span class="label">Workspace Root</span>
+        <strong id="rootValue">-</strong>
+      </article>
+      <article class="card stat-card">
+        <span class="label">Checkpoint</span>
+        <strong id="checkpointValue">-</strong>
+      </article>
+      <article class="card stat-card">
+        <span class="label">Current Job</span>
+        <strong id="jobValue">Idle</strong>
+      </article>
+    </section>
+
+    <section class="panel-grid">
+      <article class="card panel">
+        <h2>Workspace Root</h2>
+        <label class="field-label" for="rootInput">Training workspace path</label>
+        <div class="row">
+          <input id="rootInput" type="text" spellcheck="false" placeholder="C:\\Learning\\mitsm-Training">
+          <button id="applyRoot" class="secondary">Apply Root</button>
+        </div>
+        <p class="hint">Set the folder that contains the setup scripts. The dashboard will use it for all later actions.</p>
+      </article>
+
+      <article class="card panel">
+        <h2>Core Actions</h2>
+        <div class="button-grid">
+          <button data-action="preflight">Run Preflight</button>
+          <button data-action="full-setup">Run Full Setup</button>
+          <button data-action="trainer">Run Trainer</button>
+          <button data-action="snapshot-save" class="secondary">Save Snapshot</button>
+        </div>
+        <label class="check-row"><input type="checkbox" id="dryRun"> Dry-run where supported</label>
+        <label class="check-row"><input type="checkbox" id="skipPreflight"> Skip preflight during setup</label>
+        <label class="check-row"><input type="checkbox" id="resumeTrainer"> Resume trainer checkpoint</label>
+        <label class="check-row"><input type="checkbox" id="resetCheckpoint"> Reset trainer checkpoint first</label>
+      </article>
+
+      <article class="card panel">
+        <h2>Package And Repo Actions</h2>
+        <div class="button-grid compact-grid">
+          <button data-action="packages-status" class="secondary">Package Status</button>
+          <button data-action="packages-install">Install Missing Packages</button>
+          <button data-action="repos-status" class="secondary">Repo Status</button>
+          <button data-action="repos-sync">Sync Repos</button>
+          <button data-action="repos-cleanup" class="secondary">Cleanup Repos</button>
+        </div>
+        <label class="check-row"><input type="checkbox" id="removeModules"> Remove node_modules</label>
+        <label class="check-row"><input type="checkbox" id="gitClean"> Run git clean -fd</label>
+        <label class="check-row"><input type="checkbox" id="reinstallDeps"> Reinstall dependencies after cleanup</label>
+        <label class="check-row"><input type="checkbox" id="removePythonEnv"> Remove pizza-ml venv and data</label>
+        <label class="check-row"><input type="checkbox" id="removeRepos"> Delete cloned repo folders</label>
+      </article>
+
+      <article class="card panel">
+        <h2>Fallback Mode</h2>
+        <label class="check-row"><input type="checkbox" id="useFallback"> Run against fallback-scripts</label>
+        <label class="field-label" for="snapshotSelect">Named snapshot</label>
+        <div class="row">
+          <select id="snapshotSelect"></select>
+          <button id="restoreSnapshot" class="secondary">Restore Snapshot</button>
+        </div>
+        <p class="hint">Choose either the fallback root copy or a dated snapshot for restore and comparison runs.</p>
+      </article>
+    </section>
+
+    <section class="card log-panel">
+      <div class="panel-header">
+        <h2>Run Log</h2>
+        <button id="refreshStatus" class="ghost">Refresh</button>
+      </div>
+      <pre id="jobLog">Waiting for action...</pre>
+      <p id="jobMeta" class="meta"></p>
+    </section>
+  </main>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

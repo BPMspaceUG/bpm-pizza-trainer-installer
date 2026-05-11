@@ -1,0 +1,30 @@
+# Go build artifacts
+go-orchestrator/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go module cache
+go-orchestrator/vendor/
+
+# Runtime snapshots
+fallback-scripts/snapshots/
+**/snapshots/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log

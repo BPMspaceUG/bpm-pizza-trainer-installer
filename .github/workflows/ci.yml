@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'go-orchestrator/**'
+      - '.github/workflows/ci.yml'
+      - '**/*.ps1'
+      - '**/*.sh'
+  pull_request:
+    paths:
+      - 'go-orchestrator/**'
+      - '.github/workflows/ci.yml'
+      - '**/*.ps1'
+      - '**/*.sh'
+
+jobs:
+  test:
+    name: Test & vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-orchestrator/go.mod
+          cache-dependency-path: go-orchestrator/go.sum
+
+      - name: Test
+        working-directory: go-orchestrator
+        run: go test ./...
+
+      - name: Vet
+        working-directory: go-orchestrator
+        run: go vet ./...
+
+  build-check:
+    name: Build check (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-orchestrator/go.mod
+          cache-dependency-path: go-orchestrator/go.sum
+
+      - name: Build
+        working-directory: go-orchestrator
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build ./...
+
+  lint-scripts:
+    name: Lint scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          $exclude = @('fallback-scripts\snapshots', 'go-orchestrator\dist')
+          $failed = $false
+          Get-ChildItem -Recurse -Filter '*.ps1' | Where-Object {
+            $p = $_.FullName
+            -not ($exclude | Where-Object { $p -like "*\$_\*" })
+          } | ForEach-Object {
+            $errs = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$null, [ref]$errs)
+            if ($errs.Count -gt 0) {
+              Write-Error "Parse errors in $($_.FullName):"
+              $errs | ForEach-Object { Write-Error "  $_" }
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Check shell syntax
+        run: |
+          find . -name '*.sh' \
+            -not -path './go-orchestrator/dist/*' \
+            -not -path './fallback-scripts/snapshots/*' \
+          | while read f; do
+            bash -n "$f" || exit 1
+          done

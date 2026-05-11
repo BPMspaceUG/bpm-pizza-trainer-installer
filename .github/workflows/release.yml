@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Build one zip per target platform.  All five run in parallel.
+  # The systray dep (getlantern/systray) is pure-Go on all platforms, so
+  # a single Ubuntu runner with CGO_ENABLED=0 covers the whole matrix.
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            goos: linux
+            goarch: amd64
+            binary: pizza-trainer
+
+          - name: linux-arm64
+            goos: linux
+            goarch: arm64
+            binary: pizza-trainer
+
+          - name: macos-intel
+            goos: darwin
+            goarch: amd64
+            binary: pizza-trainer
+
+          - name: macos-arm64
+            goos: darwin
+            goarch: arm64
+            binary: pizza-trainer
+
+          - name: windows
+            goos: windows
+            goarch: amd64
+            binary: pizza-trainer.exe
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-orchestrator/go.mod
+          cache-dependency-path: go-orchestrator/go.sum
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p stage/${{ matrix.name }}
+          cd go-orchestrator
+          go build -trimpath -ldflags="-s -w" \
+            -o ../stage/${{ matrix.name }}/${{ matrix.binary }} \
+            ./cmd/pizza-trainer
+
+      # ── Unix package: binary + shell scripts + fallback-scripts ───────────
+      - name: Stage scripts – Unix
+        if: matrix.goos != 'windows'
+        run: |
+          d=stage/${{ matrix.name }}
+          cp 00-preflight.sh \
+             00-setup.sh \
+             03-setup-pizza-ml-trainer.sh \
+             98-save-fallback-snapshot.sh \
+             99-restore-fallback-snapshot.sh \
+             "$d/"
+          cp -r fallback-scripts "$d/"
+          rm -rf "$d/fallback-scripts/snapshots"
+
+      # ── Windows package: binary + PS1 scripts + winget manifest ──────────
+      - name: Stage scripts – Windows
+        if: matrix.goos == 'windows'
+        run: |
+          d=stage/windows
+          cp 00-preflight.ps1 \
+             00-setup.ps1 \
+             01-setup-wsl-ssh.ps1 \
+             02-setup-coding-agents.ps1 \
+             03-setup-pizza-ml-trainer.ps1 \
+             98-save-fallback-snapshot.ps1 \
+             99-restore-fallback-snapshot.ps1 \
+             launch.bat \
+             packages.winget.json \
+             "$d/"
+          cp -r fallback-scripts "$d/"
+          rm -rf "$d/fallback-scripts/snapshots"
+
+      - name: Create zip
+        run: |
+          cd stage
+          zip -r ../${{ matrix.name }}.zip ${{ matrix.name }}/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pkg-${{ matrix.name }}
+          path: ${{ matrix.name }}.zip
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Generate changelog, update CHANGELOG.md on main, create GitHub Release.
+  # ──────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+
+    steps:
+      # Checkout the default branch so we can commit CHANGELOG.md back
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Download all packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pkg-*
+          merge-multiple: true
+          path: packages/
+
+      # ── Build the release notes ───────────────────────────────────────────
+      - name: Generate changelog entry
+        run: |
+          set -euo pipefail
+
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${TAG}$" | head -1 || true)
+          DATE=$(date -u +"%Y-%m-%d")
+
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${TAG}"
+            PREV_DATE=$(git log -1 --format=%cI "$PREV_TAG")
+          else
+            RANGE="${TAG}"
+            PREV_DATE=""
+          fi
+          CURR_DATE=$(git log -1 --format=%cI "refs/tags/${TAG}")
+
+          {
+            echo "## [${TAG}] – ${DATE}"
+            echo ""
+          } > notes.md
+
+          # ── Merged pull requests ────────────────────────────────────────
+          PRS=$(gh api \
+            "repos/${REPO}/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
+            | jq -r \
+              --arg since "$PREV_DATE" \
+              --arg until "$CURR_DATE" \
+              '.[] | select(.merged_at != null)
+                   | select(if $since != "" then .merged_at > $since else true end)
+                   | select(.merged_at <= $until)
+                   | "- " + .title
+                     + " ([#" + (.number|tostring) + "](" + .html_url + "))"' \
+            2>/dev/null || true)
+
+          if [ -n "$PRS" ]; then
+            printf "### Pull Requests\n%s\n\n" "$PRS" >> notes.md
+          fi
+
+          # ── Closed issues ───────────────────────────────────────────────
+          ISSUES=$(gh api \
+            "repos/${REPO}/issues?state=closed&sort=updated&direction=desc&per_page=100" \
+            | jq -r \
+              --arg since "$PREV_DATE" \
+              --arg until "$CURR_DATE" \
+              '.[] | select(.pull_request == null)
+                   | select(.closed_at != null)
+                   | select(if $since != "" then .closed_at > $since else true end)
+                   | select(.closed_at <= $until)
+                   | "- " + .title
+                     + " ([#" + (.number|tostring) + "](" + .html_url + "))"' \
+            2>/dev/null || true)
+
+          if [ -n "$ISSUES" ]; then
+            printf "### Issues\n%s\n\n" "$ISSUES" >> notes.md
+          fi
+
+          # ── Commits (non-merge) ─────────────────────────────────────────
+          COMMITS=$(git log "$RANGE" --no-merges --pretty=format:"- %s" \
+            2>/dev/null | head -50 || true)
+
+          if [ -n "$COMMITS" ]; then
+            printf "### Commits\n%s\n\n" "$COMMITS" >> notes.md
+          fi
+
+          cat notes.md
+
+      # ── Prepend the new entry to CHANGELOG.md ────────────────────────────
+      - name: Update CHANGELOG.md
+        run: |
+          echo "" >> notes.md
+          if [ -f CHANGELOG.md ]; then
+            cat notes.md CHANGELOG.md > tmp.md && mv tmp.md CHANGELOG.md
+          else
+            cp notes.md CHANGELOG.md
+          fi
+
+      # ── Commit CHANGELOG.md back to the default branch ───────────────────
+      - name: Commit CHANGELOG.md
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          if git diff --staged --quiet; then
+            echo "No changelog changes to commit"
+          else
+            git commit -m "chore: update changelog for ${TAG} [skip ci]"
+            git push
+          fi
+
+      # ── Publish the GitHub Release with all zip assets ───────────────────
+      - name: Create GitHub release
+        run: |
+          gh release create "${TAG}" \
+            --title "Release ${TAG}" \
+            --notes-file notes.md \
+            packages/*.zip
