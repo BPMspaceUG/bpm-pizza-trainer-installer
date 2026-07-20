@@ -591,10 +591,81 @@ do_update_package() {
     esac
 }
 
+# List system packages that still have upgrades pending after the manifest
+# pass, and offer to upgrade them. Linux only — on Windows the manifest stays
+# authoritative and 'winget upgrade --all' is deliberately not used.
+system_upgrade_pending() {
+    case "$PKG_MGR" in
+        apt) apt list --upgradable 2>/dev/null | grep 'upgradable from' | cut -d/ -f1 ;;
+        dnf) dnf -q check-update 2>/dev/null | awk 'NF >= 3 && $1 ~ /\./ {print $1}' ;;
+        *)   : ;;
+    esac
+}
+
+system_upgrade_offer() {
+    case "$PKG_MGR" in
+        apt|dnf) : ;;
+        *) return 0 ;;
+    esac
+
+    local pending
+    mapfile -t pending < <(system_upgrade_pending)
+    local count=${#pending[@]}
+
+    if [ "$count" -eq 0 ]; then
+        log_ok "No other system packages need upgrading."
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${YELLOW}${count} other system package(s) can be upgraded:${RESET}"
+    printf '    %s\n' "${pending[@]:0:10}"
+    [ "$count" -gt 10 ] && echo "    ... and $((count - 10)) more"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[dry-run] would offer to upgrade these $count system package(s)"
+        return 0
+    fi
+
+    if [ "$NONINTERACTIVE" -eq 1 ]; then
+        log_info "Running non-interactively — leaving these alone. Run option [6] interactively to upgrade them."
+        return 0
+    fi
+
+    echo ""
+    read -rp "  Also upgrade these? [y/N] " answer
+    if [[ "${answer,,}" != y* ]]; then
+        log_info "System upgrade skipped."
+        return 0
+    fi
+
+    log_step "Upgrading system packages"
+    case "$PKG_MGR" in
+        apt) sudo apt-get upgrade -y || record_failure "apt-get upgrade failed — check output above." ;;
+        dnf) sudo dnf upgrade -y     || record_failure "dnf upgrade failed — check output above." ;;
+    esac
+    log_ok "System upgrade finished."
+}
+
 update_packages() {
     log_step "Updating installed packages"
 
     local updated=0 skipped=0
+
+    # Refresh the package index once up front. Without this,
+    # 'apt-get install --only-upgrade' cannot see newer versions and silently
+    # reports success on a stale index — the trainee thinks they are current
+    # when they are not. Done once per run, not once per package.
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[dry-run] would refresh the $PKG_MGR package index"
+    else
+        case "$PKG_MGR" in
+            apt) log_step "Refreshing apt package index"; sudo apt-get update || \
+                     log_warn "apt-get update failed — upgrades may not see the latest versions." ;;
+            dnf) log_step "Refreshing dnf metadata";      sudo dnf makecache || \
+                     log_warn "dnf makecache failed — upgrades may not see the latest versions." ;;
+        esac
+    fi
 
     for def in "${PACKAGE_DEFS[@]}"; do
         local winget_id check_cmd linux_method brew_method active_method
@@ -670,6 +741,12 @@ update_packages() {
 
     echo ""
     log_info "Update pass complete: $updated updated, $skipped skipped (not installed, unavailable, or Windows-managed)."
+
+    # Offer the remaining system packages. Kept separate from the manifest pass
+    # above so the trainee sees exactly what extra is about to change and can
+    # decline — a training-day run should never surprise them with a large
+    # unrelated download.
+    system_upgrade_offer
 
     # The whole key lifecycle runs on update too — not just a balance read.
     # A trainee whose key is absent or expired gets the paste prompt here,
