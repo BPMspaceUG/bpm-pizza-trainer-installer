@@ -2,6 +2,25 @@
 
 Bootstrap scripts and Go orchestrator (`pizza-trainer`) for the Pizza Trainer environment.
 
+> [!WARNING]
+> **Run this only on a disposable training machine — never on a personal or corporate device.**
+>
+> To keep classroom setup frictionless, this installer deliberately weakens the security
+> of the machine it runs on. On Windows, `01-setup-wsl-ssh.ps1` will:
+>
+> - **remove the WSL user's password** (`passwd -d`) and grant **passwordless sudo**
+>   (`NOPASSWD:ALL`)
+> - **install and start Windows OpenSSH Server**, and **open inbound port 22** on all
+>   firewall profiles, with no address restriction
+>
+> Anyone who can reach the machine on port 22 — on any network it joins — is a step away
+> from a root shell in the WSL environment. That trade is acceptable for a throwaway lab
+> VM used during a course. It is not acceptable on a laptop you use for anything else.
+>
+> Setup also pipes remote installer scripts into a shell (Docker, Tailscale, and the CAC
+> CLI) and prompts before doing so. Review [Security notes](#security-notes) before
+> running any of it.
+
 ---
 
 ## Download
@@ -282,10 +301,51 @@ not.
 
 ## Security notes
 
-These behaviors are acceptable only in a controlled training environment:
+This installer trades security for classroom convenience. Everything below is
+intentional, and acceptable **only** on a disposable training machine.
 
-- `01-setup-wsl-ssh.ps1` removes the WSL user password and grants passwordless sudo
-- `01-setup-wsl-ssh.ps1` installs and starts Windows OpenSSH Server and opens inbound port 22
-- Some install paths use remote installer scripts fetched over HTTPS
+### What gets weakened
 
-Review these before running outside an isolated lab.
+All of it lives in `01-setup-wsl-ssh.ps1`, which requires Administrator rights.
+No other script changes the machine's security posture.
+
+| Behaviour | Prompted? | Why it matters |
+| --- | --- | --- |
+| WSL user password removed (`passwd -d`) | yes — or `-EnableLabWslDefaults` | The account has no password at all |
+| Passwordless sudo (`NOPASSWD:ALL`) | yes — same prompt | Any local shell can become root without asking |
+| Inbound port 22 opened on all firewall profiles | yes — or `-OpenFirewall` | Reachable on public/untrusted networks, not just the lab LAN |
+| OpenSSH Server installed, started, set to Automatic | **no — unconditional** | Running script 01 at all means the machine accepts SSH from boot onward |
+| No `sshd_config` written | n/a | No `ListenAddress` set, so sshd binds every interface by default |
+
+Note the asymmetry: the two most damaging changes are each behind their own
+confirmation, but **installing and starting sshd is not** — it happens whenever
+script 01 runs. Declining both prompts still leaves you with a listening SSH
+server; it is just not reachable through the Windows firewall, and the WSL
+account keeps its password.
+
+Skipping script 01 entirely leaves authentication untouched. Packages, repos and
+the trainer setup (`00-setup.*`, `03-setup-pizza-ml-trainer.*`) all work without it.
+
+### Remote code execution
+
+Several install paths pipe a remote script straight into a shell:
+
+- `https://get.docker.com | sh`
+- `https://tailscale.com/install.sh | sh`
+- the CAC installer from `raw.githubusercontent.com/BPMspaceUG/bpm-CodingAgentConfigCopy`
+
+These run whatever those URLs serve at the time you run them. `02b-setup-cac.ps1`
+asks for confirmation first and accepts `-AllowRemoteScriptInstall` to skip the
+prompt in automated runs.
+
+### API keys
+
+`coding-agents-config` writes an OpenRouter API key to `~/.claude/settings.json`
+and to your shell profile (`OPENROUTER_API_KEY`, which Codex reads via `env_key`).
+Both are plaintext, on disk, in your home directory. Use a key scoped and funded
+for training use — not a personal key with a large balance.
+
+### Before running outside a lab
+
+Don't. If you need parts of this on a machine you care about, run `00-setup.*`
+(packages and repos) and skip `01-setup-wsl-ssh.ps1` entirely.
