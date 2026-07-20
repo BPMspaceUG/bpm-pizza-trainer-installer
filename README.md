@@ -76,7 +76,7 @@ pizza-trainer [command] [flags]
 | `repos-sync` | Clone or pull repositories |
 | `repos-cleanup` | Selectively clean or remove repositories |
 | `wsl-ssh` | Run the Windows WSL2 / OpenSSH setup script |
-| `coding-agents` | Run the Windows VS Code + CAC setup script |
+| `coding-agents` | Run the Windows VS Code and/or CAC setup scripts (`--only all\|extensions\|cac`) |
 | `trainer` | Run the pizza-ml trainer setup |
 | `validate` | Alias for `preflight` |
 | `checkpoint-path` | Print the default trainer checkpoint path |
@@ -144,7 +144,8 @@ go run ./cmd/pizza-trainer ui --root ..
 | `00-preflight.ps1` / `00-preflight.sh` | All | Run automatically by `00-setup.*`; can be run standalone |
 | `00-setup.ps1` / `00-setup.sh` | All | Primary entry point — installs packages, syncs repos, runs later steps |
 | `01-setup-wsl-ssh.ps1` | Windows (Admin) | Enables WSL2, installs Ubuntu, configures OpenSSH Server, opens port 22 |
-| `02-setup-coding-agents.ps1` | Windows | VS Code AI extension set and CAC CLI installation |
+| `02-setup-coding-agents.ps1` | Windows | VS Code AI extension set |
+| `02b-setup-cac.ps1` | Windows | CAC (CodingAgentConfigCopy) CLI installation |
 | `03-setup-pizza-ml-trainer.ps1` / `.sh` | All | Python venv, Food-101 dataset, PyTorch, smoke test |
 
 ## Script entry points
@@ -268,7 +269,7 @@ elevate itself, and every command works as a normal user except one:
 | --- | --- |
 | `pizza-trainer` (all other commands) | Normal user |
 | `pizza-trainer wsl-ssh` → `01-setup-wsl-ssh.ps1` | **Administrator required** |
-| `00-setup.ps1` / `02-setup-coding-agents.ps1` | Normal user |
+| `00-setup.ps1` / `02-setup-coding-agents.ps1` / `02b-setup-cac.ps1` | Normal user |
 | `03-setup-pizza-ml-trainer.ps1` | Normal user |
 
 `01-setup-wsl-ssh.ps1` declares `#Requires -RunAsAdministrator`, so it fails immediately

@@ -900,25 +900,31 @@ function Start-GuiMode {
     $grpScripts.Size     = New-Object System.Drawing.Size(($FW - $PAD*2), 78)
     $form.Controls.Add($grpScripts)
 
-    $BW3 = [int](($FW - $PAD*2 - 16 - 20) / 3)   # width of each of the 3 script buttons
+    $BW4 = [int](($FW - $PAD*2 - 16 - 30) / 4)   # width of each of the 4 script buttons
 
     $btnS01 = New-Object System.Windows.Forms.Button
-    $btnS01.Text      = "01 - WSL2 + SSH  (Admin)"
+    $btnS01.Text      = "01 - WSL2/SSH (Admin)"
     $btnS01.Location  = New-Object System.Drawing.Point(8, 22)
-    $btnS01.Size      = New-Object System.Drawing.Size($BW3, 30)
+    $btnS01.Size      = New-Object System.Drawing.Size($BW4, 30)
     $btnS01.ForeColor = [System.Drawing.Color]::Gray
     $grpScripts.Controls.Add($btnS01)
 
     $btnS02 = New-Object System.Windows.Forms.Button
-    $btnS02.Text      = "02 - VS Code Extensions + CAC"
-    $btnS02.Location  = New-Object System.Drawing.Point(($BW3 + 18), 22)
-    $btnS02.Size      = New-Object System.Drawing.Size($BW3, 30)
+    $btnS02.Text      = "02 - VS Code Ext"
+    $btnS02.Location  = New-Object System.Drawing.Point(($BW4 + 16), 22)
+    $btnS02.Size      = New-Object System.Drawing.Size($BW4, 30)
     $grpScripts.Controls.Add($btnS02)
 
+    $btnS02b = New-Object System.Windows.Forms.Button
+    $btnS02b.Text     = "02b - CAC CLI"
+    $btnS02b.Location = New-Object System.Drawing.Point(($BW4*2 + 24), 22)
+    $btnS02b.Size     = New-Object System.Drawing.Size($BW4, 30)
+    $grpScripts.Controls.Add($btnS02b)
+
     $btnS03 = New-Object System.Windows.Forms.Button
-    $btnS03.Text      = "03 - Pizza ML Trainer"
-    $btnS03.Location  = New-Object System.Drawing.Point(($BW3*2 + 26), 22)
-    $btnS03.Size      = New-Object System.Drawing.Size($BW3, 30)
+    $btnS03.Text      = "03 - Pizza ML"
+    $btnS03.Location  = New-Object System.Drawing.Point(($BW4*3 + 32), 22)
+    $btnS03.Size      = New-Object System.Drawing.Size($BW4, 30)
     $btnS03.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212)
     $btnS03.ForeColor = [System.Drawing.Color]::White
     $btnS03.FlatStyle = 'Flat'
@@ -1198,11 +1204,11 @@ function Start-GuiMode {
         }
     })
 
-    # ── Button: Script 02 (VS Code + CAC) ────────────────────
+    # ── Button: Script 02 (VS Code extensions) ───────────────
     $btnS02.Add_Click({
         $s02 = Join-Path $ScriptDir '02-setup-coding-agents.ps1'
         if (-not (Test-Path $s02)) { GuiLog "[WARN] 02-setup-coding-agents.ps1 not found."; return }
-        $r = [System.Windows.Forms.MessageBox]::Show('Run 02-setup-coding-agents.ps1 (VS Code AI extensions + CAC CLI)?','Script 02','YesNo','Question')
+        $r = [System.Windows.Forms.MessageBox]::Show('Run 02-setup-coding-agents.ps1 (VS Code AI extensions)?','Script 02','YesNo','Question')
         if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
             $btnS02.Enabled = $false
             GuiLog "`r`n==> Running 02-setup-coding-agents.ps1..."
@@ -1211,6 +1217,22 @@ function Start-GuiMode {
                 Add-RunFailure "02-setup-coding-agents.ps1 exited with code $($script:LastChildExitCode)"
             }
             $btnS02.Enabled = $true
+        }
+    })
+
+    # ── Button: Script 02b (CAC CLI) ─────────────────────────
+    $btnS02b.Add_Click({
+        $s02b = Join-Path $ScriptDir '02b-setup-cac.ps1'
+        if (-not (Test-Path $s02b)) { GuiLog "[WARN] 02b-setup-cac.ps1 not found."; return }
+        $r = [System.Windows.Forms.MessageBox]::Show('Run 02b-setup-cac.ps1 (CAC CLI)?','Script 02b','YesNo','Question')
+        if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $btnS02b.Enabled = $false
+            GuiLog "`r`n==> Running 02b-setup-cac.ps1..."
+            GuiRunScript -Path $s02b
+            if ($script:LastChildExitCode -ne 0) {
+                Add-RunFailure "02b-setup-cac.ps1 exited with code $($script:LastChildExitCode)"
+            }
+            $btnS02b.Enabled = $true
         }
     })
 
@@ -1437,8 +1459,13 @@ function Start-TerminalMode {
                 }
                 $s02 = Join-Path $ScriptDir '02-setup-coding-agents.ps1'
                 if (Test-Path $s02) {
-                    $r = Read-Host "`n  Run 02-setup-coding-agents.ps1 (VS Code extensions + CAC)? [Y/n]"
+                    $r = Read-Host "`n  Run 02-setup-coding-agents.ps1 (VS Code AI extensions)? [Y/n]"
                     if ($r -notmatch '^[Nn]') { Write-Step "Running 02-setup-coding-agents.ps1..."; & $s02; if ($LASTEXITCODE -ne 0) { Add-RunFailure "02-setup-coding-agents.ps1 exited with code $LASTEXITCODE" } }
+                }
+                $s02b = Join-Path $ScriptDir '02b-setup-cac.ps1'
+                if (Test-Path $s02b) {
+                    $r = Read-Host "`n  Run 02b-setup-cac.ps1 (CAC CLI)? [Y/n]"
+                    if ($r -notmatch '^[Nn]') { Write-Step "Running 02b-setup-cac.ps1..."; & $s02b; if ($LASTEXITCODE -ne 0) { Add-RunFailure "02b-setup-cac.ps1 exited with code $LASTEXITCODE" } }
                 }
                 $s03 = Join-Path $ScriptDir '03-setup-pizza-ml-trainer.ps1'
                 if (Test-Path $s03) {

@@ -181,13 +181,50 @@ func RunWSLSSH(kind platform.Kind, root string) error {
 	return runPowerShell(root, RunOptions{}, "01-setup-wsl-ssh.ps1")
 }
 
-func RunCodingAgents(kind platform.Kind, root string, allowRemoteInstall bool) error {
+// RunCodingAgents runs the VS Code extension script, the CAC script, or both.
+//
+// only selects which scripts run:
+//
+//	"all"        — extensions then CAC (default, matches historical behaviour)
+//	"extensions" — 02-setup-coding-agents.ps1 only
+//	"cac"        — 02b-setup-cac.ps1 only
+//
+// allowRemoteInstall applies to the CAC script only; the extension script takes
+// no parameters.
+func RunCodingAgents(kind platform.Kind, root string, allowRemoteInstall bool, only string) error {
 	if kind != platform.Windows {
 		return fmt.Errorf("coding-agents is only supported on Windows")
 	}
-	args := []string{}
-	if allowRemoteInstall {
-		args = append(args, "-AllowRemoteScriptInstall")
+
+	runExtensions := false
+	runCac := false
+	switch only {
+	case "", "all":
+		runExtensions = true
+		runCac = true
+	case "extensions":
+		runExtensions = true
+	case "cac":
+		runCac = true
+	default:
+		return fmt.Errorf("invalid --only value %q: expected all, extensions, or cac", only)
 	}
-	return runPowerShell(root, RunOptions{}, "02-setup-coding-agents.ps1", args...)
+
+	if runExtensions {
+		if err := runPowerShell(root, RunOptions{}, "02-setup-coding-agents.ps1"); err != nil {
+			return err
+		}
+	}
+
+	if runCac {
+		args := []string{}
+		if allowRemoteInstall {
+			args = append(args, "-AllowRemoteScriptInstall")
+		}
+		if err := runPowerShell(root, RunOptions{}, "02b-setup-cac.ps1", args...); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

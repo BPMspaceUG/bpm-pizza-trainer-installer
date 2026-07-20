@@ -89,6 +89,7 @@ jobs:
              00-setup.ps1 \
              01-setup-wsl-ssh.ps1 \
              02-setup-coding-agents.ps1 \
+             02b-setup-cac.ps1 \
              03-setup-pizza-ml-trainer.ps1 \
              98-save-fallback-snapshot.ps1 \
              99-restore-fallback-snapshot.ps1 \

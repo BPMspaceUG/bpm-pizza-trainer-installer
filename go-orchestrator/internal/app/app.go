@@ -257,6 +257,7 @@ func runCodingAgents(args []string) error {
 	fs := flag.NewFlagSet("coding-agents", flag.ContinueOnError)
 	root := fs.String("root", ".", "workspace root containing the setup scripts")
 	allowRemoteInstall := fs.Bool("allow-remote-script-install", false, "allow remote installer script execution where required")
+	only := fs.String("only", "all", "which part to run: all, extensions, or cac")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -264,7 +265,7 @@ func runCodingAgents(args []string) error {
 	if err != nil {
 		return err
 	}
-	return scripts.RunCodingAgents(plt, filepath.Clean(*root), *allowRemoteInstall)
+	return scripts.RunCodingAgents(plt, filepath.Clean(*root), *allowRemoteInstall, *only)
 }
 
 func runSetupActionCommand(action string, args []string, configure func(fs *flag.FlagSet, plt platform.Kind) []string) error {
@@ -439,7 +440,7 @@ Commands:
 	repos-sync        Clone or update repositories
 	repos-cleanup     Clean repositories or delete cloned repos with explicit flags
 	wsl-ssh           Run the Windows WSL/SSH setup script
-	coding-agents     Run the Windows coding-agents setup script
+	coding-agents     Run the Windows coding-agents setup scripts (--only all|extensions|cac)
   trainer           Run the trainer setup entrypoint
   validate          Alias for preflight for now
   checkpoint-path   Print the default trainer checkpoint path

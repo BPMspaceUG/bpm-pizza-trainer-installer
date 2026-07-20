@@ -712,7 +712,7 @@ sync_repos() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# Script 02 equivalent — VS Code extensions + CAC
+# Script 02 / 02b equivalents — VS Code extensions and CAC (prompted separately)
 # ─────────────────────────────────────────────────────────────
 setup_vscode_extensions() {
     log_step "Installing VS Code AI extensions (script 02 equivalent)"

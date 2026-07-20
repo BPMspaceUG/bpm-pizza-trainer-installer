@@ -29,6 +29,7 @@ var scriptFiles = []string{
 	"00-setup.sh",
 	"01-setup-wsl-ssh.ps1",
 	"02-setup-coding-agents.ps1",
+	"02b-setup-cac.ps1",
 	"03-setup-pizza-ml-trainer.ps1",
 	"03-setup-pizza-ml-trainer.sh",
 	"launch.bat",
