@@ -624,6 +624,22 @@ update_packages() {
             continue
         fi
 
+        # On WSL several tools are provided by the Windows host rather than the
+        # distro — Docker Desktop's integration puts its CLI at
+        # /mnt/wsl/docker-desktop/..., for example. Those binaries resolve under
+        # /mnt/, and running the Linux installer for them would build a second,
+        # competing copy inside the distro. Update them on Windows instead.
+        local resolved
+        resolved="$(command -v "$check_cmd" 2>/dev/null || true)"
+        [ -n "$resolved" ] && resolved="$(readlink -f "$resolved" 2>/dev/null || printf '%s' "$resolved")"
+        case "$resolved" in
+            /mnt/*)
+                log_info "$winget_id comes from the Windows host ($resolved) — update it there, skipping."
+                skipped=$((skipped + 1))
+                continue
+                ;;
+        esac
+
         if [ "$DRY_RUN" = "1" ]; then
             log_info "[dry-run] would update $winget_id via ${active_method}"
             updated=$((updated + 1))
@@ -653,7 +669,7 @@ update_packages() {
     fi
 
     echo ""
-    log_info "Update pass complete: $updated updated, $skipped skipped (not installed or unavailable)."
+    log_info "Update pass complete: $updated updated, $skipped skipped (not installed, unavailable, or Windows-managed)."
 
     # The OpenRouter balance check runs on update too, so a trainee finds out
     # their credit ran dry here rather than mid-exercise.
