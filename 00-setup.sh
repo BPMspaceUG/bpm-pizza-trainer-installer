@@ -416,6 +416,7 @@ show_menu() {
     echo -e "  |  [4] Run full setup  (1+2+3+scripts)    |"
     echo -e "  |  [5] Cleanup repos                      |"
     echo -e "  |  [6] Update installed packages          |"
+    echo -e "  |  [7] Configure coding agents (OpenRouter)|"
     echo -e "  |  [Q] Quit                               |"
     echo -e "  |                                         |"
     echo -e "  +==========================================+${RESET}"
@@ -653,6 +654,195 @@ update_packages() {
 
     echo ""
     log_info "Update pass complete: $updated updated, $skipped skipped (not installed or unavailable)."
+
+    # The OpenRouter balance check runs on update too, so a trainee finds out
+    # their credit ran dry here rather than mid-exercise.
+    if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+        echo ""
+        log_step "Checking OpenRouter balance"
+        openrouter_check_key "$OPENROUTER_API_KEY" || \
+            log_warn "OpenRouter key is missing or invalid — re-run option [7] to fix."
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# Option 7 — Coding agents via OpenRouter
+# ─────────────────────────────────────────────────────────────
+#
+# One OpenRouter key drives both CLIs. OpenRouter serves an
+# Anthropic-compatible /messages endpoint (Claude Code) and an
+# OpenAI Responses endpoint /responses (Codex), so neither CLI
+# needs a shim.
+OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+OPENROUTER_CLAUDE_MODEL="deepseek/deepseek-v4-pro"
+OPENROUTER_CODEX_MODEL="z-ai/glm-5.2"
+
+# Validate a key and print the account balance.
+# Returns 0 when the key is accepted, 1 otherwise.
+openrouter_check_key() {
+    local key="$1" body http
+
+    body="$(curl -s -m 20 -w $'\n%{http_code}' \
+        "$OPENROUTER_BASE_URL/credits" \
+        -H "Authorization: Bearer $key" 2>/dev/null)" || {
+        log_warn "Could not reach OpenRouter to validate the key (network problem?)."
+        return 1
+    }
+
+    http="$(printf '%s' "$body" | tail -n1)"
+    body="$(printf '%s' "$body" | sed '$d')"
+
+    if [ "$http" != "200" ]; then
+        log_warn "OpenRouter rejected the key (HTTP $http)."
+        return 1
+    fi
+
+    log_ok "OpenRouter key is valid."
+
+    # Field names are not pinned by us — print what we recognise, and fall
+    # back to the raw payload so the trainee always sees the balance.
+    python3 - "$body" <<'PY' 2>/dev/null || echo "  Balance response: $body"
+import json, sys
+d = json.loads(sys.argv[1])
+d = d.get("data", d)
+total = d.get("total_credits", d.get("limit"))
+used  = d.get("total_usage", d.get("usage"))
+if total is not None and used is not None:
+    print(f"  Credits purchased: ${float(total):.2f}")
+    print(f"  Credits used:      ${float(used):.2f}")
+    print(f"  Remaining:         ${float(total) - float(used):.2f}")
+elif used is not None:
+    print(f"  Credits used: ${float(used):.2f} (no limit set — pay-as-you-go)")
+else:
+    print(f"  Balance response: {json.dumps(d)}")
+PY
+    return 0
+}
+
+# Prompt for a key until one validates, or the trainee gives up.
+openrouter_prompt_key() {
+    local key
+    while true; do
+        echo "" >&2
+        echo -e "  ${CYAN}Get a key at https://openrouter.ai/keys${RESET}" >&2
+        read -rp "  Paste your OpenRouter API key (blank to skip): " key
+        if [ -z "$key" ]; then
+            return 1
+        fi
+        if openrouter_check_key "$key" >&2; then
+            printf '%s' "$key"
+            return 0
+        fi
+        log_warn "That key did not work — try again, or press Enter to skip." >&2
+    done
+}
+
+# Persist the key so Codex (which reads it via env_key) can find it.
+openrouter_persist_key() {
+    local key="$1" profile="$HOME/.bashrc"
+    [ -n "${ZSH_VERSION:-}" ] && profile="$HOME/.zshrc"
+
+    if grep -q '^export OPENROUTER_API_KEY=' "$profile" 2>/dev/null; then
+        # Replace in place; use a non-/ delimiter since keys contain no '|'
+        sed -i "s|^export OPENROUTER_API_KEY=.*|export OPENROUTER_API_KEY='$key'|" "$profile"
+    else
+        printf "\n# Added by pizza-trainer setup\nexport OPENROUTER_API_KEY='%s'\n" "$key" >> "$profile"
+    fi
+    export OPENROUTER_API_KEY="$key"
+    log_ok "Key saved to $profile (open a new shell to pick it up)."
+}
+
+# Merge the OpenRouter env block into ~/.claude/settings.json without
+# discarding any settings the trainee already has.
+openrouter_configure_claude() {
+    local key="$1" dir="$HOME/.claude"
+    mkdir -p "$dir"
+
+    OR_KEY="$key" OR_URL="$OPENROUTER_BASE_URL" OR_MODEL="$OPENROUTER_CLAUDE_MODEL" \
+    python3 - "$dir/settings.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError
+except (FileNotFoundError, ValueError, json.JSONDecodeError):
+    cfg = {}
+env = cfg.setdefault("env", {})
+env["ANTHROPIC_BASE_URL"] = os.environ["OR_URL"]
+env["ANTHROPIC_AUTH_TOKEN"] = os.environ["OR_KEY"]
+env["ANTHROPIC_MODEL"] = os.environ["OR_MODEL"]
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+    if [ $? -eq 0 ]; then
+        log_ok "Claude Code configured ($OPENROUTER_CLAUDE_MODEL)."
+    else
+        record_failure "Could not write $dir/settings.json"
+    fi
+}
+
+# Codex reads the key from the env var named by env_key, so the secret
+# stays out of config.toml.
+openrouter_configure_codex() {
+    local dir="$HOME/.codex" file
+    file="$dir/config.toml"
+    mkdir -p "$dir"
+
+    if [ -f "$file" ] && ! grep -q 'model_providers.openrouter' "$file"; then
+        cp "$file" "$file.bak"
+        log_info "Existing config.toml backed up to config.toml.bak"
+    fi
+
+    cat > "$file" <<EOF
+# Written by pizza-trainer setup — Codex via OpenRouter
+model = "$OPENROUTER_CODEX_MODEL"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "$OPENROUTER_BASE_URL"
+env_key = "OPENROUTER_API_KEY"
+EOF
+    log_ok "Codex configured ($OPENROUTER_CODEX_MODEL)."
+}
+
+setup_openrouter_agents() {
+    log_step "Configuring coding agents via OpenRouter"
+
+    local key="${OPENROUTER_API_KEY:-}"
+
+    if [ -n "$key" ]; then
+        log_info "Found an OpenRouter key in the environment — validating..."
+        if ! openrouter_check_key "$key"; then
+            log_warn "The existing key is no longer valid."
+            key=""
+        fi
+    else
+        log_info "No OpenRouter key found in the environment."
+    fi
+
+    if [ -z "$key" ]; then
+        if [ "$NONINTERACTIVE" -eq 1 ]; then
+            record_failure "No valid OpenRouter key and running non-interactively — skipping agent config."
+            return 1
+        fi
+        key="$(openrouter_prompt_key)" || {
+            log_warn "Skipped — coding agents left unconfigured."
+            return 1
+        }
+    fi
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[dry-run] would configure Claude Code ($OPENROUTER_CLAUDE_MODEL) and Codex ($OPENROUTER_CODEX_MODEL)"
+        return 0
+    fi
+
+    openrouter_persist_key "$key"
+    openrouter_configure_claude "$key"
+    openrouter_configure_codex
 }
 
 install_missing() {
@@ -1123,6 +1313,11 @@ run_action_mode() {
             update_packages
             show_run_summary "Package update"
             ;;
+        coding-agents-config)
+            reset_failures
+            setup_openrouter_agents
+            show_run_summary "Coding agent setup"
+            ;;
         repos-status)
             show_repo_status
             ;;
@@ -1258,6 +1453,13 @@ while true; do
             reset_failures
             update_packages
             show_run_summary "Package update"
+            echo ""
+            read -rp "  Press Enter to return to menu..." _dummy
+            ;;
+        7)
+            reset_failures
+            setup_openrouter_agents
+            show_run_summary "Coding agent setup"
             echo ""
             read -rp "  Press Enter to return to menu..." _dummy
             ;;

@@ -15,7 +15,7 @@
 param(
     [switch]$NoGui,
     [switch]$SkipPreflight,
-    [ValidateSet('packages-status', 'packages-install', 'packages-update', 'repos-status', 'repos-sync', 'repos-cleanup', 'full-setup')]
+    [ValidateSet('packages-status', 'packages-install', 'packages-update', 'coding-agents-config', 'repos-status', 'repos-sync', 'repos-cleanup', 'full-setup')]
     [string]$Action,
     [switch]$RemoveModules,
     [switch]$GitClean,
@@ -387,6 +387,151 @@ function Install-Packages {
     }
 }
 
+# ─────────────────────────────────────────────────────────────
+# Coding agents via OpenRouter
+# ─────────────────────────────────────────────────────────────
+#
+# One OpenRouter key drives both CLIs. OpenRouter serves an
+# Anthropic-compatible /messages endpoint (Claude Code) and an OpenAI
+# Responses endpoint /responses (Codex), so neither CLI needs a shim.
+$OpenRouterBaseUrl     = 'https://openrouter.ai/api/v1'
+$OpenRouterClaudeModel = 'deepseek/deepseek-v4-pro'
+$OpenRouterCodexModel  = 'z-ai/glm-5.2'
+
+function Test-OpenRouterKey {
+    param([string]$Key)
+
+    try {
+        $resp = Invoke-RestMethod -Uri "$OpenRouterBaseUrl/credits" -Method Get `
+            -Headers @{ Authorization = "Bearer $Key" } -TimeoutSec 20 -ErrorAction Stop
+    } catch {
+        $status = $null
+        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        if ($status -eq 401 -or $status -eq 403) {
+            Write-Warn "OpenRouter rejected the key (HTTP $status)."
+        } else {
+            Write-Warn "Could not reach OpenRouter to validate the key: $_"
+        }
+        return $false
+    }
+
+    Write-Ok 'OpenRouter key is valid.'
+
+    # Field names are not pinned by us — print what we recognise, and fall back
+    # to the raw payload so the trainee always sees the balance.
+    $d = if ($resp.PSObject.Properties.Name -contains 'data') { $resp.data } else { $resp }
+    $total = $d.total_credits
+    $used  = $d.total_usage
+    if ($null -ne $total -and $null -ne $used) {
+        Write-Host ("  Credits purchased: ${0:N2}" -f [double]$total) -ForegroundColor Gray
+        Write-Host ("  Credits used:      ${0:N2}" -f [double]$used) -ForegroundColor Gray
+        Write-Host ("  Remaining:         ${0:N2}" -f ([double]$total - [double]$used)) -ForegroundColor Gray
+    } elseif ($null -ne $used) {
+        Write-Host ("  Credits used: ${0:N2} (no limit set - pay-as-you-go)" -f [double]$used) -ForegroundColor Gray
+    } else {
+        Write-Host "  Balance response: $($d | ConvertTo-Json -Compress)" -ForegroundColor Gray
+    }
+    return $true
+}
+
+function Set-OpenRouterClaudeConfig {
+    param([string]$Key)
+
+    $dir  = Join-Path $HOME '.claude'
+    $file = Join-Path $dir 'settings.json'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    # Merge — never discard settings the trainee already has.
+    $cfg = $null
+    if (Test-Path $file) {
+        try { $cfg = Get-Content $file -Raw | ConvertFrom-Json -ErrorAction Stop } catch { $cfg = $null }
+    }
+    if ($null -eq $cfg) { $cfg = [pscustomobject]@{} }
+    if (-not $cfg.PSObject.Properties.Name -contains 'env' -or $null -eq $cfg.env) {
+        $cfg | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $cfg.env | Add-Member -NotePropertyName ANTHROPIC_BASE_URL   -NotePropertyValue $OpenRouterBaseUrl     -Force
+    $cfg.env | Add-Member -NotePropertyName ANTHROPIC_AUTH_TOKEN -NotePropertyValue $Key                  -Force
+    $cfg.env | Add-Member -NotePropertyName ANTHROPIC_MODEL      -NotePropertyValue $OpenRouterClaudeModel -Force
+
+    try {
+        $cfg | ConvertTo-Json -Depth 10 | Set-Content -Path $file -Encoding UTF8
+        Write-Ok "Claude Code configured ($OpenRouterClaudeModel)."
+    } catch {
+        Add-RunFailure "Could not write $file : $_"
+    }
+}
+
+function Set-OpenRouterCodexConfig {
+    $dir  = Join-Path $HOME '.codex'
+    $file = Join-Path $dir 'config.toml'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    if ((Test-Path $file) -and -not (Select-String -Path $file -Pattern 'model_providers.openrouter' -Quiet)) {
+        Copy-Item $file "$file.bak" -Force
+        Write-Info 'Existing config.toml backed up to config.toml.bak'
+    }
+
+    $toml = @"
+# Written by pizza-trainer setup - Codex via OpenRouter
+model = "$OpenRouterCodexModel"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "$OpenRouterBaseUrl"
+env_key = "OPENROUTER_API_KEY"
+"@
+    try {
+        Set-Content -Path $file -Value $toml -Encoding UTF8
+        Write-Ok "Codex configured ($OpenRouterCodexModel)."
+    } catch {
+        Add-RunFailure "Could not write $file : $_"
+    }
+}
+
+function Set-OpenRouterAgents {
+    param([switch]$DryRun)
+
+    Write-Step 'Configuring coding agents via OpenRouter'
+
+    $key = $env:OPENROUTER_API_KEY
+    if ($key) {
+        Write-Info 'Found an OpenRouter key in the environment - validating...'
+        if (-not (Test-OpenRouterKey -Key $key)) {
+            Write-Warn 'The existing key is no longer valid.'
+            $key = $null
+        }
+    } else {
+        Write-Info 'No OpenRouter key found in the environment.'
+    }
+
+    while (-not $key) {
+        Write-Host ''
+        Write-Host '  Get a key at https://openrouter.ai/keys' -ForegroundColor Cyan
+        $entered = Read-Host '  Paste your OpenRouter API key (blank to skip)'
+        if ([string]::IsNullOrWhiteSpace($entered)) {
+            Write-Warn 'Skipped - coding agents left unconfigured.'
+            return
+        }
+        if (Test-OpenRouterKey -Key $entered) { $key = $entered }
+        else { Write-Warn 'That key did not work - try again, or press Enter to skip.' }
+    }
+
+    if ($DryRun) {
+        Write-Info "[dry-run] would configure Claude Code ($OpenRouterClaudeModel) and Codex ($OpenRouterCodexModel)"
+        return
+    }
+
+    # Codex reads the key via env_key, so it must exist in the user environment.
+    [Environment]::SetEnvironmentVariable('OPENROUTER_API_KEY', $key, 'User')
+    $env:OPENROUTER_API_KEY = $key
+    Write-Ok 'Key saved to the user environment (open a new terminal to pick it up).'
+
+    Set-OpenRouterClaudeConfig -Key $key
+    Set-OpenRouterCodexConfig
+}
+
 # Updates are driven strictly from packages.winget.json — never 'winget upgrade --all',
 # which would touch every application on the trainee's machine rather than just the
 # training set.
@@ -442,6 +587,16 @@ function Update-Packages {
 
     Write-Host ""
     Write-Info "Update pass complete: $updated updated, $skipped skipped."
+
+    # The OpenRouter balance check runs on update too, so a trainee finds out
+    # their credit ran dry here rather than mid-exercise.
+    if ($env:OPENROUTER_API_KEY) {
+        Write-Host ""
+        Write-Step 'Checking OpenRouter balance'
+        if (-not (Test-OpenRouterKey -Key $env:OPENROUTER_API_KEY)) {
+            Write-Warn 'OpenRouter key is missing or invalid - re-run option [7] to fix.'
+        }
+    }
 }
 
 function Sync-Repos {
@@ -790,6 +945,12 @@ function Invoke-ActionMode {
             Reset-RunFailures
             Update-Packages -StatusMap (Get-PackageStatus) -DryRun:$DryRun
             if (Show-RunSummary -Label 'Package update') { return 0 }
+            return 2
+        }
+        'coding-agents-config' {
+            Reset-RunFailures
+            Set-OpenRouterAgents -DryRun:$DryRun
+            if (Show-RunSummary -Label 'Coding agent setup') { return 0 }
             return 2
         }
         'repos-status' {
@@ -1385,6 +1546,7 @@ function Show-TerminalMenu {
     Write-Host "  |  [4] Run full setup  (1+2+3+scripts)    |" -ForegroundColor Cyan
     Write-Host "  |  [5] Cleanup repos                      |" -ForegroundColor Cyan
     Write-Host "  |  [6] Update installed packages          |" -ForegroundColor Cyan
+    Write-Host "  |  [7] Configure coding agents (OpenRouter)|" -ForegroundColor Cyan
     Write-Host "  |  [Q] Quit                               |" -ForegroundColor Cyan
     Write-Host "  |                                         |" -ForegroundColor Cyan
     Write-Host "  +==========================================+" -ForegroundColor Cyan
@@ -1569,6 +1731,12 @@ function Start-TerminalMode {
                 Reset-RunFailures
                 Update-Packages -StatusMap (Get-PackageStatus) -DryRun:$DryRun
                 [void](Show-RunSummary -Label 'Package update')
+                Write-Host ""; Read-Host "  Press Enter to return"
+            }
+            '7' {
+                Reset-RunFailures
+                Set-OpenRouterAgents -DryRun:$DryRun
+                [void](Show-RunSummary -Label 'Coding agent setup')
                 Write-Host ""; Read-Host "  Press Enter to return"
             }
             'Q' {

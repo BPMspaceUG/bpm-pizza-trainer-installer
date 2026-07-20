@@ -73,6 +73,7 @@ pizza-trainer [command] [flags]
 | `packages-status` | Show installed/missing package status |
 | `packages-install` | Install all missing packages |
 | `packages-update` | Update installed packages (manifest only, never system-wide) |
+| `coding-agents-config` | Configure Claude Code + Codex against a single OpenRouter key |
 | `repos-status` | Show repository clone status |
 | `repos-sync` | Clone or pull repositories |
 | `repos-cleanup` | Selectively clean or remove repositories |

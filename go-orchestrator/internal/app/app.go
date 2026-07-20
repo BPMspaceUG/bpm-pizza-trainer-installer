@@ -39,6 +39,8 @@ func Run(args []string) error {
 		return runPackagesInstall(args[1:])
 	case "packages-update":
 		return runPackagesUpdate(args[1:])
+	case "coding-agents-config":
+		return runCodingAgentsConfig(args[1:])
 	case "repos-status":
 		return runReposStatus(args[1:])
 	case "repos-sync":
@@ -220,6 +222,10 @@ func runPackagesInstall(args []string) error {
 
 func runPackagesUpdate(args []string) error {
 	return runSetupActionCommand("packages-update", args, nil)
+}
+
+func runCodingAgentsConfig(args []string) error {
+	return runSetupActionCommand("coding-agents-config", args, nil)
 }
 
 func runReposStatus(args []string) error {
@@ -443,6 +449,7 @@ Commands:
 	packages-status   Show package status
 	packages-install  Install all missing packages
 	packages-update   Update installed packages (manifest only, never system-wide)
+	coding-agents-config  Configure Claude Code + Codex against OpenRouter
 	repos-status      Show repository status
 	repos-sync        Clone or update repositories
 	repos-cleanup     Clean repositories or delete cloned repos with explicit flags
