@@ -882,8 +882,83 @@ setup_tailscale_ssh() {
 # OpenAI Responses endpoint /responses (Codex), so neither CLI
 # needs a shim.
 OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+
+# Claude Code: main model plus the background/fast model. Claude Code calls a
+# Haiku-class model for lightweight work; on a gateway that serves no Anthropic
+# models those calls fail unless ANTHROPIC_DEFAULT_HAIKU_MODEL is set.
 OPENROUTER_CLAUDE_MODEL="deepseek/deepseek-v4-pro"
+OPENROUTER_CLAUDE_FAST_MODEL="deepseek/deepseek-v4-flash"
+
+# Codex: preferred model, with a fallback if it is ever withdrawn.
 OPENROUTER_CODEX_MODEL="z-ai/glm-5.2"
+OPENROUTER_CODEX_MODEL_FALLBACK="z-ai/glm-5.1"
+
+# Resolved at run time by openrouter_resolve_codex_model.
+OPENROUTER_CODEX_MODEL_RESOLVED=""
+OPENROUTER_CODEX_CONTEXT=""
+
+# Ask OpenRouter which of our candidate models actually exist, and how big a
+# context each has. Model availability changes over time — pinning a context
+# window we invented would be worse than asking.
+openrouter_resolve_codex_model() {
+    local models candidate
+    OPENROUTER_CODEX_MODEL_RESOLVED=""
+    OPENROUTER_CODEX_CONTEXT=""
+
+    models="$(curl -fsSL -m 20 "$OPENROUTER_BASE_URL/models" 2>/dev/null)" || {
+        log_warn "Could not reach the OpenRouter model list — assuming $OPENROUTER_CODEX_MODEL."
+        OPENROUTER_CODEX_MODEL_RESOLVED="$OPENROUTER_CODEX_MODEL"
+        return 0
+    }
+
+    for candidate in "$OPENROUTER_CODEX_MODEL" "$OPENROUTER_CODEX_MODEL_FALLBACK"; do
+        local ctx
+        ctx="$(printf '%s' "$models" | MODEL="$candidate" python3 -c "
+import sys, json, os
+want = os.environ['MODEL']
+for m in json.load(sys.stdin)['data']:
+    if m['id'] == want:
+        print(m.get('context_length') or '')
+        break
+" 2>/dev/null)"
+        if [ -n "$ctx" ]; then
+            OPENROUTER_CODEX_MODEL_RESOLVED="$candidate"
+            OPENROUTER_CODEX_CONTEXT="$ctx"
+            if [ "$candidate" != "$OPENROUTER_CODEX_MODEL" ]; then
+                log_warn "$OPENROUTER_CODEX_MODEL is unavailable — falling back to $candidate."
+            fi
+            return 0
+        fi
+    done
+
+    log_warn "Neither $OPENROUTER_CODEX_MODEL nor $OPENROUTER_CODEX_MODEL_FALLBACK is listed — using $OPENROUTER_CODEX_MODEL."
+    OPENROUTER_CODEX_MODEL_RESOLVED="$OPENROUTER_CODEX_MODEL"
+}
+
+# Prove the configured models actually answer, rather than assuming the config
+# is right. Uses the Anthropic-compatible endpoint for Claude's model and the
+# OpenAI-compatible one for Codex's, matching how each CLI talks.
+openrouter_verify_model() {
+    local key="$1" model="$2" style="$3" code
+    if [ "$style" = "anthropic" ]; then
+        code="$(curl -s -o /dev/null -w '%{http_code}' -m 45 \
+            "$OPENROUTER_BASE_URL/messages" \
+            -H "x-api-key: $key" -H 'content-type: application/json' \
+            -d "{\"model\":\"$model\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" 2>/dev/null)"
+    else
+        code="$(curl -s -o /dev/null -w '%{http_code}' -m 45 \
+            "$OPENROUTER_BASE_URL/chat/completions" \
+            -H "Authorization: Bearer $key" -H 'content-type: application/json' \
+            -d "{\"model\":\"$model\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" 2>/dev/null)"
+    fi
+
+    if [ "$code" = "200" ]; then
+        log_ok "$model responded (HTTP 200)."
+        return 0
+    fi
+    log_warn "$model did not respond as expected (HTTP $code)."
+    return 1
+}
 
 # Validate a key and print the account balance.
 # Returns 0 when the key is accepted, 1 otherwise.
@@ -1009,7 +1084,16 @@ openrouter_configure_claude() {
     local key="$1" dir="$HOME/.claude"
     mkdir -p "$dir"
 
-    OR_KEY="$key" OR_URL="$OPENROUTER_BASE_URL" OR_MODEL="$OPENROUTER_CLAUDE_MODEL" \
+    # Variable names verified against code.claude.com/docs/en/env-vars and
+    # llm-gateway-connect. Notes:
+    #   * ANTHROPIC_AUTH_TOKEN is sent as "Authorization: Bearer <value>", so the
+    #     value is the raw key — do NOT prefix it with "Bearer".
+    #   * ANTHROPIC_DEFAULT_HAIKU_MODEL matters most: Claude Code calls a
+    #     Haiku-class model for background work, and OpenRouter serves no
+    #     Anthropic models here, so it must be remapped or those calls fail.
+    #   * SONNET/OPUS are remapped so the /model aliases keep working.
+    OR_KEY="$key" OR_URL="$OPENROUTER_BASE_URL" \
+    OR_MODEL="$OPENROUTER_CLAUDE_MODEL" OR_FAST="$OPENROUTER_CLAUDE_FAST_MODEL" \
     python3 - "$dir/settings.json" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -1021,9 +1105,19 @@ try:
 except (FileNotFoundError, ValueError, json.JSONDecodeError):
     cfg = {}
 env = cfg.setdefault("env", {})
-env["ANTHROPIC_BASE_URL"] = os.environ["OR_URL"]
+env["ANTHROPIC_BASE_URL"]  = os.environ["OR_URL"]
 env["ANTHROPIC_AUTH_TOKEN"] = os.environ["OR_KEY"]
-env["ANTHROPIC_MODEL"] = os.environ["OR_MODEL"]
+env["ANTHROPIC_MODEL"]      = os.environ["OR_MODEL"]
+# Background/fast model — without this Claude Code asks for a Haiku model the
+# gateway does not serve.
+env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]  = os.environ["OR_FAST"]
+# Keep the /model sonnet|opus aliases pointing at something that exists.
+env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = os.environ["OR_MODEL"]
+env["ANTHROPIC_DEFAULT_OPUS_MODEL"]   = os.environ["OR_MODEL"]
+# Stay under the gateway model's output limit.
+env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "32768"
+# No version checks / telemetry / error reports outside the gateway.
+env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
@@ -1047,17 +1141,24 @@ openrouter_configure_codex() {
         log_info "Existing config.toml backed up to config.toml.bak"
     fi
 
-    cat > "$file" <<EOF
-# Written by pizza-trainer setup — Codex via OpenRouter
-model = "$OPENROUTER_CODEX_MODEL"
-model_provider = "openrouter"
+    local model="${OPENROUTER_CODEX_MODEL_RESOLVED:-$OPENROUTER_CODEX_MODEL}"
 
-[model_providers.openrouter]
-name = "OpenRouter"
-base_url = "$OPENROUTER_BASE_URL"
-env_key = "OPENROUTER_API_KEY"
-EOF
-    log_ok "Codex configured ($OPENROUTER_CODEX_MODEL)."
+    {
+        echo "# Written by pizza-trainer setup — Codex via OpenRouter"
+        echo "model = \"$model\""
+        echo 'model_provider = "openrouter"'
+        # Codex otherwise assumes its built-in OpenAI catalog's context size,
+        # which is wrong for this model and skews history compaction.
+        [ -n "$OPENROUTER_CODEX_CONTEXT" ] && \
+            echo "model_context_window = $OPENROUTER_CODEX_CONTEXT"
+        echo ''
+        echo '[model_providers.openrouter]'
+        echo 'name = "OpenRouter"'
+        echo "base_url = \"$OPENROUTER_BASE_URL\""
+        echo 'env_key = "OPENROUTER_API_KEY"'
+    } > "$file"
+
+    log_ok "Codex configured ($model${OPENROUTER_CODEX_CONTEXT:+, ${OPENROUTER_CODEX_CONTEXT} ctx})."
 }
 
 # Full key lifecycle: check it exists -> validate it -> if absent OR rejected,
@@ -1113,8 +1214,23 @@ setup_openrouter_agents() {
         return 0
     fi
 
+    openrouter_resolve_codex_model
     openrouter_configure_claude "$OPENROUTER_KEY_RESOLVED"
     openrouter_configure_codex
+
+    # Don't just write config and declare victory — confirm each model answers.
+    echo ""
+    log_step "Verifying the configured models respond"
+    openrouter_verify_model "$OPENROUTER_KEY_RESOLVED" "$OPENROUTER_CLAUDE_MODEL"      anthropic || \
+        record_failure "Claude Code's model ($OPENROUTER_CLAUDE_MODEL) did not answer — check the key's credit and model access."
+    openrouter_verify_model "$OPENROUTER_KEY_RESOLVED" "$OPENROUTER_CLAUDE_FAST_MODEL" anthropic || \
+        record_failure "Claude Code's background model ($OPENROUTER_CLAUDE_FAST_MODEL) did not answer."
+    openrouter_verify_model "$OPENROUTER_KEY_RESOLVED" "${OPENROUTER_CODEX_MODEL_RESOLVED:-$OPENROUTER_CODEX_MODEL}" openai || \
+        record_failure "Codex's model did not answer."
+
+    echo ""
+    log_info "Open a new terminal (or source your shell rc) before running claude/codex,"
+    log_info "then confirm with: codex doctor"
 }
 
 install_missing() {
