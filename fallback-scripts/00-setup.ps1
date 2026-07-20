@@ -14,16 +14,26 @@
 #>
 param(
     [switch]$NoGui,
-    [switch]$SkipPreflight
+    [switch]$SkipPreflight,
+    [ValidateSet('packages-status', 'packages-install', 'packages-update', 'coding-agents-config', 'repos-status', 'repos-sync', 'repos-cleanup', 'full-setup')]
+    [string]$Action,
+    [switch]$RemoveModules,
+    [switch]$GitClean,
+    [switch]$Reinstall,
+    [switch]$RemovePythonEnv,
+    [switch]$RemoveRepos,
+    [switch]$DryRun,
+    [string]$PizzaRepoUrl
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
 
 # ── Execution policy warning ─────────────────────────────────
-$_policy = Get-ExecutionPolicy -Scope CurrentUser
-if ($_policy -eq 'Restricted' -or $_policy -eq 'AllSigned') {
-    $msg = @"
+try {
+    $_policy = Get-ExecutionPolicy -Scope CurrentUser -ErrorAction Stop
+    if ($_policy -eq 'Restricted' -or $_policy -eq 'AllSigned') {
+        $msg = @"
 WARNING: PowerShell script execution is blocked (policy: $_policy).
 
 You should launch this tool using launch.bat (double-click it), NOT by running the .ps1 directly.
@@ -33,17 +43,20 @@ To fix manually, run this in PowerShell:
 
 The script will attempt to continue anyway via the current process bypass, but some child scripts may fail.
 "@
-    try {
-        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-        [System.Windows.Forms.MessageBox]::Show(
-            $msg,
-            'Script Execution Policy Warning',
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        ) | Out-Null
-    } catch {
-        Write-Warning $msg
+        try {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+            [System.Windows.Forms.MessageBox]::Show(
+                $msg,
+                'Script Execution Policy Warning',
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        } catch {
+            Write-Warning $msg
+        }
     }
+} catch {
+    Write-Verbose 'Skipping execution policy warning because Get-ExecutionPolicy is unavailable in this host.'
 }
 
 $ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -53,13 +66,12 @@ $PreflightPs1 = Join-Path $ScriptDir '00-preflight.ps1'
 
 $Repos = @(
     @{ Url = 'https://github.com/BPMspaceUG/bpm-CodingAgentConfigCopy'; Dir = "$LearningDir\bpm-CodingAgentConfigCopy"; RunInstallSh = $true;  SetupScript = '';                              PromptUrl = $false },
-    @{ Url = 'https://github.com/BPMspaceUG/voice-web-exercise';        Dir = "$LearningDir\voice-web-exercise";        RunInstallSh = $false; SetupScript = '';                              PromptUrl = $false },
-    @{ Url = 'https://github.com/BPMspaceUG/voice-agent-exercise';      Dir = "$LearningDir\voice-agent-exercise";      RunInstallSh = $false; SetupScript = '';                              PromptUrl = $false },
     @{ Url = 'https://github.com/BPMspaceUG/bpm-pizza-ml';                Dir = "$LearningDir\pizza-ml";                  RunInstallSh = $false; SetupScript = '03-setup-pizza-ml-trainer.ps1'; PromptUrl = $false }
 )
 
 # Script-scoped GUI delegates — set by Start-GuiMode so Sync-Repos can show dialogs
 $script:GuiPromptUrl      = $null   # scriptblock(repoName) -> url string
+$script:GuiPromptSecret   = $null   # scriptblock(label) -> secret string (masked input)
 $script:GuiRunSetupScript = $null   # scriptblock(scriptPath) -> void
 
 # ─────────────────────────────────────────────────────────────
@@ -282,9 +294,9 @@ function Invoke-ShellInstall {
 
         Write-Warn "Could not run install.sh automatically."
         if ([string]::IsNullOrWhiteSpace($installArgs)) {
-            Write-Info "To run manually: open WSL or Git Bash and run: cd '$RepoDir'; bash install.sh"
+            Write-Info ("To run manually: open WSL or Git Bash and run: cd '{0}'; bash install.sh" -f $RepoDir)
         } else {
-            Write-Info "To run manually: open WSL or Git Bash and run: cd '$RepoDir'; bash install.sh $installArgs"
+            Write-Info ("To run manually: open WSL or Git Bash and run: cd '{0}'; bash install.sh {1}" -f $RepoDir, $installArgs)
         }
         return $false
     } finally {
@@ -332,17 +344,17 @@ function Test-PizzaMlVenv {
             [System.Windows.Forms.Application]::DoEvents()
         }
     }
-    if ($allOk) { Write-Ok "Pizza-ML venv is ready." } else { Write-Warn "Some venv checks failed — re-run script 03 or check output above." }
+    if ($allOk) { Write-Ok "Pizza-ML venv is ready." } else { Write-Warn "Some venv checks failed - re-run script 03 or check output above." }
     return $allOk
 }
 
 function Ensure-Pnpm {
     if (Get-Command pnpm -ErrorAction SilentlyContinue) { return }
-    Write-Info "pnpm not found — installing via npm..."
+    Write-Info "pnpm not found - installing via npm..."
     if (Get-Command npm -ErrorAction SilentlyContinue) {
         npm install -g pnpm
         if ($LASTEXITCODE -eq 0) { Write-Ok "pnpm installed." } else { Write-Warn "npm install -g pnpm failed." }
-    } else { Write-Warn "npm not found — install Node.js first." }
+    } else { Write-Warn "npm not found - install Node.js first." }
 }
 
 # Returns array of hashtables: @{ Id; Type('winget'|'npm'); NpmPkg; Installed; Skip; SkipReason }
@@ -371,13 +383,235 @@ function Install-Packages {
         } else {
             Write-Step "Installing $id"
             winget install --id $id --silent --accept-package-agreements --accept-source-agreements
-            if ($LASTEXITCODE -eq 0) { Write-Ok "$id installed." } else { Add-RunFailure "$id — winget exit code $LASTEXITCODE" }
+            if ($LASTEXITCODE -eq 0) { Write-Ok "$id installed." } else { Add-RunFailure "$id - winget exit code $LASTEXITCODE" }
+        }
+    }
+}
+
+# ─────────────────────────────────────────────────────────────
+# Coding agents via OpenRouter
+# ─────────────────────────────────────────────────────────────
+#
+# One OpenRouter key drives both CLIs. OpenRouter serves an
+# Anthropic-compatible /messages endpoint (Claude Code) and an OpenAI
+# Responses endpoint /responses (Codex), so neither CLI needs a shim.
+$OpenRouterBaseUrl     = 'https://openrouter.ai/api/v1'
+$OpenRouterClaudeModel = 'deepseek/deepseek-v4-pro'
+$OpenRouterCodexModel  = 'z-ai/glm-5.2'
+
+function Test-OpenRouterKey {
+    param([string]$Key)
+
+    try {
+        $resp = Invoke-RestMethod -Uri "$OpenRouterBaseUrl/credits" -Method Get `
+            -Headers @{ Authorization = "Bearer $Key" } -TimeoutSec 20 -ErrorAction Stop
+    } catch {
+        $status = $null
+        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        if ($status -eq 401 -or $status -eq 403) {
+            Write-Warn "OpenRouter rejected the key (HTTP $status)."
+        } else {
+            Write-Warn "Could not reach OpenRouter to validate the key: $_"
+        }
+        return $false
+    }
+
+    Write-Ok 'OpenRouter key is valid.'
+
+    # Field names are not pinned by us — print what we recognise, and fall back
+    # to the raw payload so the trainee always sees the balance.
+    $d = if ($resp.PSObject.Properties.Name -contains 'data') { $resp.data } else { $resp }
+    $total = $d.total_credits
+    $used  = $d.total_usage
+    if ($null -ne $total -and $null -ne $used) {
+        Write-Host ("  Credits purchased: ${0:N2}" -f [double]$total) -ForegroundColor Gray
+        Write-Host ("  Credits used:      ${0:N2}" -f [double]$used) -ForegroundColor Gray
+        Write-Host ("  Remaining:         ${0:N2}" -f ([double]$total - [double]$used)) -ForegroundColor Gray
+    } elseif ($null -ne $used) {
+        Write-Host ("  Credits used: ${0:N2} (no limit set - pay-as-you-go)" -f [double]$used) -ForegroundColor Gray
+    } else {
+        Write-Host "  Balance response: $($d | ConvertTo-Json -Compress)" -ForegroundColor Gray
+    }
+    return $true
+}
+
+function Set-OpenRouterClaudeConfig {
+    param([string]$Key)
+
+    $dir  = Join-Path $HOME '.claude'
+    $file = Join-Path $dir 'settings.json'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    # Merge — never discard settings the trainee already has.
+    $cfg = $null
+    if (Test-Path $file) {
+        try { $cfg = Get-Content $file -Raw | ConvertFrom-Json -ErrorAction Stop } catch { $cfg = $null }
+    }
+    if ($null -eq $cfg) { $cfg = [pscustomobject]@{} }
+    if (-not $cfg.PSObject.Properties.Name -contains 'env' -or $null -eq $cfg.env) {
+        $cfg | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $cfg.env | Add-Member -NotePropertyName ANTHROPIC_BASE_URL   -NotePropertyValue $OpenRouterBaseUrl     -Force
+    $cfg.env | Add-Member -NotePropertyName ANTHROPIC_AUTH_TOKEN -NotePropertyValue $Key                  -Force
+    $cfg.env | Add-Member -NotePropertyName ANTHROPIC_MODEL      -NotePropertyValue $OpenRouterClaudeModel -Force
+
+    try {
+        $cfg | ConvertTo-Json -Depth 10 | Set-Content -Path $file -Encoding UTF8
+        Write-Ok "Claude Code configured ($OpenRouterClaudeModel)."
+    } catch {
+        Add-RunFailure "Could not write $file : $_"
+    }
+}
+
+function Set-OpenRouterCodexConfig {
+    $dir  = Join-Path $HOME '.codex'
+    $file = Join-Path $dir 'config.toml'
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+
+    if ((Test-Path $file) -and -not (Select-String -Path $file -Pattern 'model_providers.openrouter' -Quiet)) {
+        Copy-Item $file "$file.bak" -Force
+        Write-Info 'Existing config.toml backed up to config.toml.bak'
+    }
+
+    $toml = @"
+# Written by pizza-trainer setup - Codex via OpenRouter
+model = "$OpenRouterCodexModel"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "$OpenRouterBaseUrl"
+env_key = "OPENROUTER_API_KEY"
+"@
+    try {
+        Set-Content -Path $file -Value $toml -Encoding UTF8
+        Write-Ok "Codex configured ($OpenRouterCodexModel)."
+    } catch {
+        Add-RunFailure "Could not write $file : $_"
+    }
+}
+
+function Set-OpenRouterAgents {
+    param([switch]$DryRun)
+
+    Write-Step 'Configuring coding agents via OpenRouter'
+
+    $key = $env:OPENROUTER_API_KEY
+    if ($key) {
+        Write-Info 'Found an OpenRouter key in the environment - validating...'
+        if (-not (Test-OpenRouterKey -Key $key)) {
+            Write-Warn 'The existing key is no longer valid.'
+            $key = $null
+        }
+    } else {
+        Write-Info 'No OpenRouter key found in the environment.'
+    }
+
+    while (-not $key) {
+        if ($script:GuiPromptSecret) {
+            # In GUI mode a console Read-Host would block on a window the user
+            # may not even be looking at — use the dialog delegate instead.
+            $entered = & $script:GuiPromptSecret 'OpenRouter API key (get one at https://openrouter.ai/keys)'
+        } else {
+            Write-Host ''
+            Write-Host '  Get a key at https://openrouter.ai/keys' -ForegroundColor Cyan
+            $entered = Read-Host '  Paste your OpenRouter API key (blank to skip)'
+        }
+        if ([string]::IsNullOrWhiteSpace($entered)) {
+            Write-Warn 'Skipped - coding agents left unconfigured.'
+            return
+        }
+        if (Test-OpenRouterKey -Key $entered) { $key = $entered }
+        else { Write-Warn 'That key did not work - try again, or press Enter to skip.' }
+    }
+
+    if ($DryRun) {
+        Write-Info "[dry-run] would configure Claude Code ($OpenRouterClaudeModel) and Codex ($OpenRouterCodexModel)"
+        return
+    }
+
+    # Codex reads the key via env_key, so it must exist in the user environment.
+    [Environment]::SetEnvironmentVariable('OPENROUTER_API_KEY', $key, 'User')
+    $env:OPENROUTER_API_KEY = $key
+    Write-Ok 'Key saved to the user environment (open a new terminal to pick it up).'
+
+    Set-OpenRouterClaudeConfig -Key $key
+    Set-OpenRouterCodexConfig
+}
+
+# Updates are driven strictly from packages.winget.json — never 'winget upgrade --all',
+# which would touch every application on the trainee's machine rather than just the
+# training set.
+function Update-Packages {
+    param(
+        [object[]]$StatusMap,
+        [switch]$DryRun
+    )
+
+    if (-not $StatusMap) { $StatusMap = Get-PackageStatus }
+
+    $updated = 0
+    $skipped = 0
+
+    foreach ($entry in $StatusMap) {
+        # Only update what is present — updating a missing package would silently
+        # turn this into an install.
+        if (-not $entry.Installed) {
+            Write-Info "$($entry.Id) not installed - skipping (use option [2] to install)"
+            $skipped++
+            continue
+        }
+
+        if ($DryRun) {
+            $how = if ($entry.Type -eq 'npm') { "npm install -g $($entry.NpmPkg)@latest" } else { "winget upgrade --id $($entry.Id)" }
+            Write-Info "[dry-run] would update $($entry.Id) via $how"
+            $updated++
+            continue
+        }
+
+        if ($entry.Type -eq 'npm') {
+            Write-Step "Updating $($entry.NpmPkg) (npm install -g $($entry.NpmPkg)@latest)"
+            npm install -g "$($entry.NpmPkg)@latest"
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "$($entry.NpmPkg) up to date."
+                $updated++
+            } else {
+                Add-RunFailure "$($entry.NpmPkg) update failed."
+            }
+        } else {
+            Write-Step "Updating $($entry.Id)"
+            winget upgrade --id $entry.Id --exact --silent --accept-package-agreements --accept-source-agreements
+            # winget exits non-zero when no upgrade is available; that is success here.
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "$($entry.Id) up to date."
+                $updated++
+            } else {
+                Write-Info "$($entry.Id) - no applicable upgrade (winget exit $LASTEXITCODE)"
+                $skipped++
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Info "Update pass complete: $updated updated, $skipped skipped."
+
+    # The OpenRouter balance check runs on update too, so a trainee finds out
+    # their credit ran dry here rather than mid-exercise.
+    if ($env:OPENROUTER_API_KEY) {
+        Write-Host ""
+        Write-Step 'Checking OpenRouter balance'
+        if (-not (Test-OpenRouterKey -Key $env:OPENROUTER_API_KEY)) {
+            Write-Warn 'OpenRouter key is missing or invalid - re-run option [7] to fix.'
         }
     }
 }
 
 function Sync-Repos {
-    param([object[]]$RepoList)
+    param(
+        [object[]]$RepoList,
+        [switch]$NonInteractive,
+        [switch]$DryRun
+    )
     if (-not (Test-Path $LearningDir)) { New-Item -ItemType Directory -Path $LearningDir -Force | Out-Null }
     foreach ($repo in $RepoList) {
         $name = Split-Path $repo.Dir -Leaf
@@ -385,21 +619,26 @@ function Sync-Repos {
         Write-Host "  $name" -ForegroundColor White
         if ($script:GuiLog) { $script:GuiLog.AppendText("`r`n  $name`r`n"); [System.Windows.Forms.Application]::DoEvents() }
 
-        # Resolve URL — may need to prompt for pizza-ml
+        # Resolve URL - may need to prompt for pizza-ml
         $url = $repo.Url
         if ([string]::IsNullOrEmpty($url) -and -not (Test-Path (Join-Path $repo.Dir '.git'))) {
             if ($repo.PromptUrl) {
-                if ($script:GuiPromptUrl) {
+                if ($PizzaRepoUrl) {
+                    $url = $PizzaRepoUrl
+                } elseif ($script:GuiPromptUrl) {
                     $url = & $script:GuiPromptUrl $name
+                } elseif ($NonInteractive) {
+                    Write-Warn "$name has no URL and action mode is non-interactive - skipping"
+                    continue
                 } else {
                     $url = (Read-Host "  Enter Git URL for $name (or press Enter to skip)").Trim()
                 }
                 if ([string]::IsNullOrEmpty($url)) {
-                    Write-Warn "$name has no URL and directory does not exist — skipping"
+                    Write-Warn "$name has no URL and directory does not exist - skipping"
                     continue
                 }
             } else {
-                Write-Warn "$name has no URL configured — skipping"
+                Write-Warn "$name has no URL configured - skipping"
                 continue
             }
         }
@@ -408,25 +647,43 @@ function Sync-Repos {
         if ($script:GuiLog) { $script:GuiLog.AppendText("  $url`r`n"); [System.Windows.Forms.Application]::DoEvents() }
 
         if (Test-Path (Join-Path $repo.Dir '.git')) {
-            Write-Info "Pulling..."
-            git -C $repo.Dir pull
-            if ($LASTEXITCODE -eq 0) { Write-Ok "Updated" } else { Add-RunFailure "${name}: git pull failed" }
+            if ($DryRun) {
+                Write-Info "[dry-run] Would pull latest changes..."
+            } else {
+                Write-Info "Pulling..."
+                git -C $repo.Dir pull
+                if ($LASTEXITCODE -eq 0) { Write-Ok "Updated" } else { Add-RunFailure ("{0}: git pull failed" -f $name) }
+            }
         } else {
-            Write-Info "Cloning..."
-            git clone $url $repo.Dir
-            if ($LASTEXITCODE -ne 0) { Write-Fail "Clone failed — skipping install"; Add-RunFailure "${name}: git clone failed"; continue }
-            Write-Ok "Cloned to $($repo.Dir)"
+            if ($DryRun) {
+                Write-Info "[dry-run] Would clone repository..."
+            } else {
+                Write-Info "Cloning..."
+                git clone $url $repo.Dir
+                if ($LASTEXITCODE -ne 0) { Write-Fail "Clone failed - skipping install"; Add-RunFailure ("{0}: git clone failed" -f $name); continue }
+                Write-Ok "Cloned to $($repo.Dir)"
+            }
         }
 
         # Run install.sh if flagged (e.g. bpm-CodingAgentConfigCopy)
         if ($repo.RunInstallSh) {
-            if (-not (Invoke-ShellInstall -RepoDir $repo.Dir)) {
-                Add-RunFailure "${name}: install.sh did not complete successfully"
+            if ($DryRun) {
+                Write-Info "[dry-run] Would run install.sh if present."
+            } elseif (-not (Invoke-ShellInstall -RepoDir $repo.Dir)) {
+                Add-RunFailure ("{0}: install.sh did not complete successfully" -f $name)
             }
         }
 
         # Run setup script if configured (e.g. 03-setup-pizza-ml-trainer.ps1 for pizza-ml)
         if (-not [string]::IsNullOrEmpty($repo.SetupScript)) {
+            if ($NonInteractive) {
+                if ($DryRun) {
+                    Write-Info "[dry-run] Would skip $($repo.SetupScript) in non-interactive action mode. Use pizza-trainer trainer separately."
+                } else {
+                    Write-Info "Skipping $($repo.SetupScript) in non-interactive action mode. Use pizza-trainer trainer separately."
+                }
+                continue
+            }
             $scriptPath = Join-Path $ScriptDir $repo.SetupScript
             if (Test-Path $scriptPath) {
                 if ($script:GuiRunSetupScript) {
@@ -437,30 +694,34 @@ function Sync-Repos {
                         Write-Info "Running $($repo.SetupScript)..."
                         & $scriptPath -RepoUrl $url
                         if ($LASTEXITCODE -ne 0) {
-                            Add-RunFailure "${name}: $($repo.SetupScript) exited with code $LASTEXITCODE"
+                            Add-RunFailure ("{0}: {1} exited with code {2}" -f $name, $repo.SetupScript, $LASTEXITCODE)
                         }
                     }
                 }
                 # Verify venv after setup script
                 if (-not (Test-PizzaMlVenv -ProjectDir $repo.Dir)) {
-                    Add-RunFailure "${name}: post-setup verification failed"
+                    Add-RunFailure ("{0}: post-setup verification failed" -f $name)
                 }
             } else {
-                Add-RunFailure "${name}: $($repo.SetupScript) not found in $ScriptDir"
+                Add-RunFailure ("{0}: {1} not found in {2}" -f $name, $repo.SetupScript, $ScriptDir)
             }
         }
 
         # Run JS package manager install if applicable
         $pm = Get-NodePackageManager -Dir $repo.Dir
         if ($pm) {
-            if ($pm -eq 'pnpm') { Ensure-Pnpm }
-            $pmCmd = Get-Command $pm -ErrorAction SilentlyContinue
-            if ($pmCmd) {
-                Write-Info "Running $pm install..."
-                Push-Location $repo.Dir
-                try { & $pm install; if ($LASTEXITCODE -eq 0) { Write-Ok "$pm install done" } else { Add-RunFailure "${name}: $pm install failed" } }
-                finally { Pop-Location }
-            } else { Add-RunFailure "${name}: $pm not found on PATH — run '$pm install' manually in $($repo.Dir)" }
+            if ($DryRun) {
+                Write-Info "[dry-run] Would run $pm install..."
+            } else {
+                if ($pm -eq 'pnpm') { Ensure-Pnpm }
+                $pmCmd = Get-Command $pm -ErrorAction SilentlyContinue
+                if ($pmCmd) {
+                    Write-Info "Running $pm install..."
+                    Push-Location $repo.Dir
+                    try { & $pm install; if ($LASTEXITCODE -eq 0) { Write-Ok "$pm install done" } else { Add-RunFailure ("{0}: {1} install failed" -f $name, $pm) } }
+                    finally { Pop-Location }
+                } else { Add-RunFailure ("{0}: {1} not found on PATH; run {1} install manually in {2}" -f $name, $pm, $repo.Dir) }
+            }
         }
     }
 }
@@ -471,28 +732,45 @@ function Invoke-CleanupRepos {
         [switch]$RemoveModules,
         [switch]$GitClean,
         [switch]$Reinstall,
-        [switch]$RemovePythonEnv,   # removes venv/, data/, and *.pth files (pizza-ml)
-        [switch]$RemoveRepos
+        [switch]$RemovePythonEnv,   # removes venv/, generated data, and *.pth files (pizza-ml)
+        [switch]$RemoveRepos,
+        [switch]$DryRun
     )
     Write-Step "Cleaning up repositories"
     foreach ($repo in $RepoList) {
         $name = Split-Path $repo.Dir -Leaf
-        if (-not (Test-Path $repo.Dir)) { Write-Warn "$name not found — skipping"; continue }
+        if (-not (Test-Path $repo.Dir)) { Write-Warn "$name not found - skipping"; continue }
         Write-Info "$name"
 
         if ($RemoveRepos) {
-            Write-Info "  Removing cloned repository directory..."
-            Remove-Item $repo.Dir -Recurse -Force
-            Write-Ok "  repository removed"
+            if ($DryRun) {
+                Write-Info "  [dry-run] Would remove cloned repository directory..."
+            } else {
+                Write-Info "  Removing cloned repository directory..."
+                try {
+                    Remove-Item $repo.Dir -Recurse -Force -ErrorAction Stop
+                    Write-Ok "  repository removed"
+                } catch {
+                    Add-RunFailure "${name}: failed to remove repository directory: $_"
+                }
+            }
             continue
         }
 
         if ($RemoveModules) {
             $nm = Join-Path $repo.Dir 'node_modules'
             if (Test-Path $nm) {
-                Write-Info "  Removing node_modules..."
-                Remove-Item $nm -Recurse -Force
-                Write-Ok "  node_modules removed"
+                if ($DryRun) {
+                    Write-Info "  [dry-run] Would remove node_modules..."
+                } else {
+                    Write-Info "  Removing node_modules..."
+                    try {
+                        Remove-Item $nm -Recurse -Force -ErrorAction Stop
+                        Write-Ok "  node_modules removed"
+                    } catch {
+                        Add-RunFailure "${name}: failed to remove node_modules: $_"
+                    }
+                }
             } else { Write-Info "  node_modules not present" }
         }
 
@@ -500,10 +778,19 @@ function Invoke-CleanupRepos {
             # venv
             $venvDir = Join-Path $repo.Dir 'venv'
             if (Test-Path $venvDir) {
-                Write-Info "  Removing venv..."
-                Remove-Item $venvDir -Recurse -Force
-                Write-Ok "  venv removed"
+                if ($DryRun) {
+                    Write-Info "  [dry-run] Would remove venv..."
+                } else {
+                    Write-Info "  Removing venv..."
+                    try {
+                        Remove-Item $venvDir -Recurse -Force -ErrorAction Stop
+                        Write-Ok "  venv removed"
+                    } catch {
+                        Add-RunFailure "${name}: failed to remove venv: $_"
+                    }
+                }
             }
+
             # data/
             $dataDir = Join-Path $repo.Dir 'data'
             if (Test-Path $dataDir) {
@@ -512,31 +799,58 @@ function Invoke-CleanupRepos {
                     $trackedDataFiles = @(git -C $repo.Dir ls-files -- data 2>$null)
                 }
                 $rawDataDir = Join-Path $dataDir '_food101_raw'
+
                 if ($trackedDataFiles.Count -gt 0) {
                     if (Test-Path $rawDataDir) {
-                        Write-Info "  Removing data/_food101_raw..."
-                        Remove-Item $rawDataDir -Recurse -Force
-                        Write-Ok "  data/_food101_raw removed"
+                        if ($DryRun) {
+                            Write-Info "  [dry-run] Would remove data/_food101_raw..."
+                        } else {
+                            Write-Info "  Removing data/_food101_raw..."
+                            try {
+                                Remove-Item $rawDataDir -Recurse -Force -ErrorAction Stop
+                                Write-Ok "  data/_food101_raw removed"
+                            } catch {
+                                Add-RunFailure "${name}: failed to remove data/_food101_raw: $_"
+                            }
+                        }
                     }
                     Write-Info "  data/ contains tracked files - leaving repository data in place"
+                } elseif ($DryRun) {
+                    Write-Info "  [dry-run] Would remove data/..."
                 } else {
                     Write-Info "  Removing data/..."
-                    Remove-Item $dataDir -Recurse -Force
-                    Write-Ok "  data/ removed"
+                    try {
+                        Remove-Item $dataDir -Recurse -Force -ErrorAction Stop
+                        Write-Ok "  data/ removed"
+                    } catch {
+                        Add-RunFailure "${name}: failed to remove data/: $_"
+                    }
                 }
             }
             # *.pth model files
             $pthFiles = @(Get-ChildItem $repo.Dir -Filter '*.pth' -File -ErrorAction SilentlyContinue)
             foreach ($f in $pthFiles) {
-                Remove-Item $f.FullName -Force
-                Write-Ok "  Removed $($f.Name)"
+                if ($DryRun) {
+                    Write-Info "  [dry-run] Would remove $($f.Name)"
+                } else {
+                    try {
+                        Remove-Item $f.FullName -Force -ErrorAction Stop
+                        Write-Ok "  Removed $($f.Name)"
+                    } catch {
+                        Add-RunFailure "${name}: failed to remove $($f.Name): $_"
+                    }
+                }
             }
             if ($pthFiles.Count -eq 0) { Write-Info "  No .pth files found" }
         }
 
         if ($GitClean) {
-            Write-Info "  Running git clean -fd..."
-            git -C $repo.Dir clean -fd
+            if ($DryRun) {
+                Write-Info "  [dry-run] Would run git clean -fd..."
+            } else {
+                Write-Info "  Running git clean -fd..."
+                git -C $repo.Dir clean -fd
+            }
         }
 
         if ($Reinstall) {
@@ -545,12 +859,148 @@ function Invoke-CleanupRepos {
                 if ($pm -eq 'pnpm') { Ensure-Pnpm }
                 $pmCmd = Get-Command $pm -ErrorAction SilentlyContinue
                 if ($pmCmd) {
-                    Write-Info "  Running $pm install..."
-                    Push-Location $repo.Dir
-                    try { & $pm install; if ($LASTEXITCODE -eq 0) { Write-Ok "  $pm install done" } else { Write-Warn "  $pm install failed" } }
-                    finally { Pop-Location }
+                    if ($DryRun) {
+                        Write-Info "  [dry-run] Would run $pm install..."
+                    } else {
+                        Write-Info "  Running $pm install..."
+                        Push-Location $repo.Dir
+                        try { & $pm install; if ($LASTEXITCODE -eq 0) { Write-Ok "  $pm install done" } else { Add-RunFailure "${name}: $pm install failed" } }
+                        finally { Pop-Location }
+                    }
                 } else { Write-Warn "  $pm not found on PATH" }
             }
+        }
+    }
+}
+
+function Show-PackageStatusAction {
+    Write-Step "Checking installed packages"
+    $status = Get-PackageStatus
+    Write-Host ""
+    Write-Host ("  {0,-44} {1}" -f "Package ID", "Status") -ForegroundColor White
+    Write-Host ("  {0,-44} {1}" -f "----------", "------") -ForegroundColor DarkGray
+    foreach ($item in $status) {
+        if ($item.Installed) {
+            Write-Host ("  [OK]  {0,-42} installed" -f $item.Id) -ForegroundColor Green
+        } else {
+            Write-Host ("  [--]  {0,-42} MISSING" -f $item.Id) -ForegroundColor Yellow
+        }
+    }
+    return $status
+}
+
+function Get-EffectiveRepos {
+    $effective = @()
+    foreach ($repo in $Repos) {
+        $copy = @{}
+        foreach ($key in $repo.Keys) {
+            $copy[$key] = $repo[$key]
+        }
+        if ($PizzaRepoUrl -and $copy.PromptUrl -and [string]::IsNullOrEmpty($copy.Url)) {
+            $copy.Url = $PizzaRepoUrl
+        }
+        $effective += $copy
+    }
+    return $effective
+}
+
+function Show-RepoStatusAction {
+    param([object[]]$RepoList)
+
+    Write-Step "Checking repositories"
+    foreach ($repo in $RepoList) {
+        $name = Split-Path $repo.Dir -Leaf
+        $cloned = Test-Path (Join-Path $repo.Dir '.git')
+        $status = if ($cloned) { 'Cloned' } else { 'Not cloned' }
+        if ($cloned -and -not [string]::IsNullOrEmpty($repo.SetupScript)) {
+            $venvPy = Join-Path $repo.Dir 'venv\Scripts\python.exe'
+            if (Test-Path $venvPy) {
+                & $venvPy -c "import torch" 2>$null | Out-Null
+                $status = if ($LASTEXITCODE -eq 0) { 'Cloned | venv OK' } else { 'Cloned | venv no torch' }
+            } else {
+                $status = 'Cloned | venv missing'
+            }
+        }
+
+        $color = if ($cloned) { 'Green' } else { 'Yellow' }
+        Write-Host ("  [{0}] {1,-24} {2}" -f ($(if ($cloned) { 'OK' } else { '--' }), $name, $status)) -ForegroundColor $color
+        Write-Host ("       {0}" -f $repo.Dir) -ForegroundColor DarkGray
+    }
+}
+
+function Invoke-ActionMode {
+    $repoList = Get-EffectiveRepos
+
+    switch ($Action) {
+        'packages-status' {
+            Show-PackageStatusAction | Out-Null
+            return 0
+        }
+        'packages-install' {
+            Reset-RunFailures
+            $status = Get-PackageStatus
+            $toInstall = @($status | Where-Object { -not $_.Installed -and -not $_.Skip })
+            if ($toInstall.Count -eq 0) {
+                Write-Ok 'All packages already installed.'
+            } else {
+                Install-Packages -Ids ($toInstall | ForEach-Object { $_.Id }) -StatusMap $toInstall
+            }
+            if (Show-RunSummary -Label 'Package installation') { return 0 }
+            return 2
+        }
+        'packages-update' {
+            Reset-RunFailures
+            Update-Packages -StatusMap (Get-PackageStatus) -DryRun:$DryRun
+            if (Show-RunSummary -Label 'Package update') { return 0 }
+            return 2
+        }
+        'coding-agents-config' {
+            Reset-RunFailures
+            Set-OpenRouterAgents -DryRun:$DryRun
+            if (Show-RunSummary -Label 'Coding agent setup') { return 0 }
+            return 2
+        }
+        'repos-status' {
+            Show-RepoStatusAction -RepoList $repoList
+            return 0
+        }
+        'repos-sync' {
+            Reset-RunFailures
+            Sync-Repos -RepoList $repoList -NonInteractive -DryRun:$DryRun
+            if (Show-RunSummary -Label 'Repository sync') { return 0 }
+            return 2
+        }
+        'repos-cleanup' {
+            if (-not ($RemoveModules -or $GitClean -or $Reinstall -or $RemovePythonEnv -or $RemoveRepos)) {
+                Write-Fail 'repos-cleanup requires at least one cleanup flag.'
+                return 1
+            }
+            Reset-RunFailures
+            Invoke-CleanupRepos -RepoList $repoList -RemoveModules:$RemoveModules -GitClean:$GitClean -Reinstall:$Reinstall -RemovePythonEnv:$RemovePythonEnv -RemoveRepos:$RemoveRepos -DryRun:$DryRun
+            if (Show-RunSummary -Label 'Repository cleanup') { return 0 }
+            return 2
+        }
+        'full-setup' {
+            Reset-RunFailures
+            $status = Get-PackageStatus
+            $toInstall = @($status | Where-Object { -not $_.Installed -and -not $_.Skip })
+            if ($toInstall.Count -gt 0 -and -not $DryRun) {
+                Install-Packages -Ids ($toInstall | ForEach-Object { $_.Id }) -StatusMap $toInstall
+            } elseif ($toInstall.Count -gt 0 -and $DryRun) {
+                Write-Step 'Dry-run package installation'
+                foreach ($entry in $toInstall) {
+                    Write-Info "[dry-run] Would install $($entry.Id)"
+                }
+            } else {
+                Write-Ok 'All packages already installed.'
+            }
+            Sync-Repos -RepoList $repoList -NonInteractive -DryRun:$DryRun
+            if (Show-RunSummary -Label 'Full setup') { return 0 }
+            return 2
+        }
+        default {
+            Write-Fail "Unknown action: $Action"
+            return 1
         }
     }
 }
@@ -567,8 +1017,8 @@ function Start-GuiMode {
     $BTNW = 150; $BTNH = 28
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text            = 'Pizza Trainer — Environment Setup'
-    $form.ClientSize      = New-Object System.Drawing.Size($FW, 920)
+    $form.Text            = 'Pizza Trainer - Environment Setup'
+    $form.ClientSize      = New-Object System.Drawing.Size($FW, 956)
     $form.StartPosition   = 'CenterScreen'
     $form.FormBorderStyle = 'FixedSingle'
     $form.MaximizeBox     = $false
@@ -576,7 +1026,7 @@ function Start-GuiMode {
 
     # ── Header ──────────────────────────────────────────────
     $lblTitle = New-Object System.Windows.Forms.Label
-    $lblTitle.Text      = 'Pizza Trainer — Environment Setup'
+    $lblTitle.Text      = 'Pizza Trainer - Environment Setup'
     $lblTitle.Font      = New-Object System.Drawing.Font('Segoe UI', 13, [System.Drawing.FontStyle]::Bold)
     $lblTitle.AutoSize  = $true
     $lblTitle.Location  = New-Object System.Drawing.Point($PAD, $PAD)
@@ -621,6 +1071,12 @@ function Start-GuiMode {
     $btnInstSel.ForeColor = [System.Drawing.Color]::White
     $btnInstSel.FlatStyle = 'Flat'
     $grpPkg.Controls.Add($btnInstSel)
+
+    $btnUpdateAll = New-Object System.Windows.Forms.Button
+    $btnUpdateAll.Text     = 'Update All'
+    $btnUpdateAll.Location = New-Object System.Drawing.Point(($BTNW*3 + 26), 268)
+    $btnUpdateAll.Size     = New-Object System.Drawing.Size($BTNW, $BTNH)
+    $grpPkg.Controls.Add($btnUpdateAll)
 
     # ── Repos GroupBox ────────────────────────────────────────
     $grpRepo = New-Object System.Windows.Forms.GroupBox
@@ -678,37 +1134,50 @@ function Start-GuiMode {
     $grpScripts = New-Object System.Windows.Forms.GroupBox
     $grpScripts.Text     = 'Setup Scripts'
     $grpScripts.Location = New-Object System.Drawing.Point($PAD, 594)
-    $grpScripts.Size     = New-Object System.Drawing.Size(($FW - $PAD*2), 78)
+    $grpScripts.Size     = New-Object System.Drawing.Size(($FW - $PAD*2), 114)
     $form.Controls.Add($grpScripts)
 
-    $BW3 = [int](($FW - $PAD*2 - 16 - 20) / 3)   # width of each of the 3 script buttons
+    $BW4 = [int](($FW - $PAD*2 - 16 - 30) / 4)   # width of each of the 4 script buttons
 
     $btnS01 = New-Object System.Windows.Forms.Button
-    $btnS01.Text      = "01 — WSL2 + SSH  (Admin)"
+    $btnS01.Text      = "01 - WSL2/SSH (Admin)"
     $btnS01.Location  = New-Object System.Drawing.Point(8, 22)
-    $btnS01.Size      = New-Object System.Drawing.Size($BW3, 30)
+    $btnS01.Size      = New-Object System.Drawing.Size($BW4, 30)
     $btnS01.ForeColor = [System.Drawing.Color]::Gray
     $grpScripts.Controls.Add($btnS01)
 
     $btnS02 = New-Object System.Windows.Forms.Button
-    $btnS02.Text      = "02 — VS Code Extensions + CAC"
-    $btnS02.Location  = New-Object System.Drawing.Point(($BW3 + 18), 22)
-    $btnS02.Size      = New-Object System.Drawing.Size($BW3, 30)
+    $btnS02.Text      = "02 - VS Code Ext"
+    $btnS02.Location  = New-Object System.Drawing.Point(($BW4 + 16), 22)
+    $btnS02.Size      = New-Object System.Drawing.Size($BW4, 30)
     $grpScripts.Controls.Add($btnS02)
 
+    $btnS02b = New-Object System.Windows.Forms.Button
+    $btnS02b.Text     = "02b - CAC CLI"
+    $btnS02b.Location = New-Object System.Drawing.Point(($BW4*2 + 24), 22)
+    $btnS02b.Size     = New-Object System.Drawing.Size($BW4, 30)
+    $grpScripts.Controls.Add($btnS02b)
+
     $btnS03 = New-Object System.Windows.Forms.Button
-    $btnS03.Text      = "03 — Pizza ML Trainer"
-    $btnS03.Location  = New-Object System.Drawing.Point(($BW3*2 + 26), 22)
-    $btnS03.Size      = New-Object System.Drawing.Size($BW3, 30)
+    $btnS03.Text      = "03 - Pizza ML"
+    $btnS03.Location  = New-Object System.Drawing.Point(($BW4*3 + 32), 22)
+    $btnS03.Size      = New-Object System.Drawing.Size($BW4, 30)
     $btnS03.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212)
     $btnS03.ForeColor = [System.Drawing.Color]::White
     $btnS03.FlatStyle = 'Flat'
     $grpScripts.Controls.Add($btnS03)
 
+    # Row 2 — agent configuration (not a numbered setup script)
+    $btnAgents = New-Object System.Windows.Forms.Button
+    $btnAgents.Text     = 'Coding Agents (OpenRouter)'
+    $btnAgents.Location = New-Object System.Drawing.Point(8, 58)
+    $btnAgents.Size     = New-Object System.Drawing.Size((($BW4*2) + 8), 30)
+    $grpScripts.Controls.Add($btnAgents)
+
     # ── Log GroupBox ─────────────────────────────────────────
     $grpLog = New-Object System.Windows.Forms.GroupBox
     $grpLog.Text     = 'Log'
-    $grpLog.Location = New-Object System.Drawing.Point($PAD, 682)
+    $grpLog.Location = New-Object System.Drawing.Point($PAD, 718)
     $grpLog.Size     = New-Object System.Drawing.Size(($FW - $PAD*2), 228)
     $form.Controls.Add($grpLog)
 
@@ -732,7 +1201,7 @@ function Start-GuiMode {
     $script:GuiPromptUrl = {
         param([string]$RepoName)
         $dlgUrl = New-Object System.Windows.Forms.Form
-        $dlgUrl.Text = "Repo URL — $RepoName"
+        $dlgUrl.Text = "Repo URL - $RepoName"
         $dlgUrl.ClientSize = New-Object System.Drawing.Size(430, 110)
         $dlgUrl.StartPosition = 'CenterParent'; $dlgUrl.FormBorderStyle = 'FixedDialog'; $dlgUrl.MaximizeBox = $false
         $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Git URL for $RepoName (leave blank to skip):"; $lbl.AutoSize = $true; $lbl.Location = New-Object System.Drawing.Point(12, 12); $dlgUrl.Controls.Add($lbl)
@@ -740,6 +1209,21 @@ function Start-GuiMode {
         $bOk = New-Object System.Windows.Forms.Button; $bOk.Text = 'OK'; $bOk.Location = New-Object System.Drawing.Point(12, 68); $bOk.Size = New-Object System.Drawing.Size(80, 26); $bOk.DialogResult = 'OK'; $dlgUrl.AcceptButton = $bOk; $dlgUrl.Controls.Add($bOk)
         $bCl = New-Object System.Windows.Forms.Button; $bCl.Text = 'Skip'; $bCl.Location = New-Object System.Drawing.Point(102, 68); $bCl.Size = New-Object System.Drawing.Size(80, 26); $bCl.DialogResult = 'Cancel'; $dlgUrl.Controls.Add($bCl)
         if ($dlgUrl.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { return $txt.Text.Trim() }
+        return ''
+    }
+
+    # Delegate: masked secret prompt (API keys must not echo on screen)
+    $script:GuiPromptSecret = {
+        param([string]$Label)
+        $dlgKey = New-Object System.Windows.Forms.Form
+        $dlgKey.Text = 'API key'
+        $dlgKey.ClientSize = New-Object System.Drawing.Size(460, 110)
+        $dlgKey.StartPosition = 'CenterParent'; $dlgKey.FormBorderStyle = 'FixedDialog'; $dlgKey.MaximizeBox = $false
+        $lblK = New-Object System.Windows.Forms.Label; $lblK.Text = "$Label`n(leave blank to skip):"; $lblK.AutoSize = $true; $lblK.Location = New-Object System.Drawing.Point(12, 10); $dlgKey.Controls.Add($lblK)
+        $txtK = New-Object System.Windows.Forms.TextBox; $txtK.Location = New-Object System.Drawing.Point(12, 46); $txtK.Size = New-Object System.Drawing.Size(430, 23); $txtK.UseSystemPasswordChar = $true; $dlgKey.Controls.Add($txtK)
+        $bOkK = New-Object System.Windows.Forms.Button; $bOkK.Text = 'OK'; $bOkK.Location = New-Object System.Drawing.Point(12, 76); $bOkK.Size = New-Object System.Drawing.Size(80, 26); $bOkK.DialogResult = 'OK'; $dlgKey.AcceptButton = $bOkK; $dlgKey.Controls.Add($bOkK)
+        $bClK = New-Object System.Windows.Forms.Button; $bClK.Text = 'Skip'; $bClK.Location = New-Object System.Drawing.Point(102, 76); $bClK.Size = New-Object System.Drawing.Size(80, 26); $bClK.DialogResult = 'Cancel'; $dlgKey.Controls.Add($bClK)
+        if ($dlgKey.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { return $txtK.Text.Trim() }
         return ''
     }
 
@@ -823,7 +1307,7 @@ function Start-GuiMode {
                 $venvPy = Join-Path $repo.Dir 'venv\Scripts\python.exe'
                 if (Test-Path $venvPy) {
                     $torchOk = & $venvPy -c "import torch" 2>&1
-                    $status  = if ($LASTEXITCODE -eq 0) { 'Cloned  |  venv OK' } else { 'Cloned  |  venv — no torch' }
+                    $status  = if ($LASTEXITCODE -eq 0) { 'Cloned  |  venv OK' } else { 'Cloned  |  venv no torch' }
                 } else {
                     $status = 'Cloned  |  venv missing'
                 }
@@ -875,6 +1359,22 @@ function Start-GuiMode {
         [void](Show-RunSummary -Label 'Package installation')
         $btnInstSel.Enabled = $true
         $btnRefresh.Enabled = $true
+    })
+
+    $btnUpdateAll.Add_Click({
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            'Update all installed packages from the manifest?', 'Update Packages', 'YesNo', 'Question')
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        Reset-RunFailures
+        $btnUpdateAll.Enabled = $false
+        $btnRefresh.Enabled   = $false
+        GuiLog "`r`n==> Updating installed packages..."
+        Update-Packages -StatusMap (Get-PackageStatus)
+        GuiLog "Done. Refreshing..."
+        Refresh-PackageList
+        [void](Show-RunSummary -Label 'Package update')
+        $btnUpdateAll.Enabled = $true
+        $btnRefresh.Enabled   = $true
     })
 
     # ── Button: Clone/Update Selected ────────────────────────
@@ -979,11 +1479,11 @@ function Start-GuiMode {
         }
     })
 
-    # ── Button: Script 02 (VS Code + CAC) ────────────────────
+    # ── Button: Script 02 (VS Code extensions) ───────────────
     $btnS02.Add_Click({
         $s02 = Join-Path $ScriptDir '02-setup-coding-agents.ps1'
         if (-not (Test-Path $s02)) { GuiLog "[WARN] 02-setup-coding-agents.ps1 not found."; return }
-        $r = [System.Windows.Forms.MessageBox]::Show('Run 02-setup-coding-agents.ps1 (VS Code AI extensions + CAC CLI)?','Script 02','YesNo','Question')
+        $r = [System.Windows.Forms.MessageBox]::Show('Run 02-setup-coding-agents.ps1 (VS Code AI extensions)?','Script 02','YesNo','Question')
         if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
             $btnS02.Enabled = $false
             GuiLog "`r`n==> Running 02-setup-coding-agents.ps1..."
@@ -992,6 +1492,35 @@ function Start-GuiMode {
                 Add-RunFailure "02-setup-coding-agents.ps1 exited with code $($script:LastChildExitCode)"
             }
             $btnS02.Enabled = $true
+        }
+    })
+
+    # ── Button: Coding agents via OpenRouter ─────────────────
+    $btnAgents.Add_Click({
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            'Configure Claude Code and Codex to use OpenRouter?', 'Coding Agents', 'YesNo', 'Question')
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        Reset-RunFailures
+        $btnAgents.Enabled = $false
+        GuiLog "`r`n==> Configuring coding agents via OpenRouter..."
+        Set-OpenRouterAgents
+        [void](Show-RunSummary -Label 'Coding agent setup')
+        $btnAgents.Enabled = $true
+    })
+
+    # ── Button: Script 02b (CAC CLI) ─────────────────────────
+    $btnS02b.Add_Click({
+        $s02b = Join-Path $ScriptDir '02b-setup-cac.ps1'
+        if (-not (Test-Path $s02b)) { GuiLog "[WARN] 02b-setup-cac.ps1 not found."; return }
+        $r = [System.Windows.Forms.MessageBox]::Show('Run 02b-setup-cac.ps1 (CAC CLI)?','Script 02b','YesNo','Question')
+        if ($r -eq [System.Windows.Forms.DialogResult]::Yes) {
+            $btnS02b.Enabled = $false
+            GuiLog "`r`n==> Running 02b-setup-cac.ps1..."
+            GuiRunScript -Path $s02b
+            if ($script:LastChildExitCode -ne 0) {
+                Add-RunFailure "02b-setup-cac.ps1 exited with code $($script:LastChildExitCode)"
+            }
+            $btnS02b.Enabled = $true
         }
     })
 
@@ -1080,6 +1609,8 @@ function Show-TerminalMenu {
     Write-Host "  |  [3] Clone / update repos               |" -ForegroundColor Cyan
     Write-Host "  |  [4] Run full setup  (1+2+3+scripts)    |" -ForegroundColor Cyan
     Write-Host "  |  [5] Cleanup repos                      |" -ForegroundColor Cyan
+    Write-Host "  |  [6] Update installed packages          |" -ForegroundColor Cyan
+    Write-Host "  |  [7] Configure coding agents (OpenRouter)|" -ForegroundColor Cyan
     Write-Host "  |  [Q] Quit                               |" -ForegroundColor Cyan
     Write-Host "  |                                         |" -ForegroundColor Cyan
     Write-Host "  +==========================================+" -ForegroundColor Cyan
@@ -1214,12 +1745,17 @@ function Start-TerminalMode {
                     if (Test-Admin) {
                         $r = Read-Host "`n  Run 01-setup-wsl-ssh.ps1 (WSL2 + OpenSSH)? [Y/n]"
                         if ($r -notmatch '^[Nn]') { Write-Step "Running 01..."; & $s01; if ($LASTEXITCODE -ne 0) { Add-RunFailure "01-setup-wsl-ssh.ps1 exited with code $LASTEXITCODE" } }
-                    } else { Write-Warn "Not Administrator — skipping 01-setup-wsl-ssh.ps1" }
+                    } else { Write-Warn "Not Administrator - skipping 01-setup-wsl-ssh.ps1" }
                 }
                 $s02 = Join-Path $ScriptDir '02-setup-coding-agents.ps1'
                 if (Test-Path $s02) {
-                    $r = Read-Host "`n  Run 02-setup-coding-agents.ps1 (VS Code extensions + CAC)? [Y/n]"
+                    $r = Read-Host "`n  Run 02-setup-coding-agents.ps1 (VS Code AI extensions)? [Y/n]"
                     if ($r -notmatch '^[Nn]') { Write-Step "Running 02-setup-coding-agents.ps1..."; & $s02; if ($LASTEXITCODE -ne 0) { Add-RunFailure "02-setup-coding-agents.ps1 exited with code $LASTEXITCODE" } }
+                }
+                $s02b = Join-Path $ScriptDir '02b-setup-cac.ps1'
+                if (Test-Path $s02b) {
+                    $r = Read-Host "`n  Run 02b-setup-cac.ps1 (CAC CLI)? [Y/n]"
+                    if ($r -notmatch '^[Nn]') { Write-Step "Running 02b-setup-cac.ps1..."; & $s02b; if ($LASTEXITCODE -ne 0) { Add-RunFailure "02b-setup-cac.ps1 exited with code $LASTEXITCODE" } }
                 }
                 $s03 = Join-Path $ScriptDir '03-setup-pizza-ml-trainer.ps1'
                 if (Test-Path $s03) {
@@ -1255,6 +1791,18 @@ function Start-TerminalMode {
                 Invoke-TerminalCleanup
                 Write-Host ""; Read-Host "  Press Enter to return"
             }
+            '6' {
+                Reset-RunFailures
+                Update-Packages -StatusMap (Get-PackageStatus) -DryRun:$DryRun
+                [void](Show-RunSummary -Label 'Package update')
+                Write-Host ""; Read-Host "  Press Enter to return"
+            }
+            '7' {
+                Reset-RunFailures
+                Set-OpenRouterAgents -DryRun:$DryRun
+                [void](Show-RunSummary -Label 'Coding agent setup')
+                Write-Host ""; Read-Host "  Press Enter to return"
+            }
             'Q' {
                 $running = $false
                 Write-Host ""
@@ -1276,6 +1824,10 @@ if (-not (Invoke-SetupPreflight)) {
     Write-Host ''
     Write-Host '  Setup cancelled after preflight.' -ForegroundColor Yellow
     exit 1
+}
+
+if ($Action) {
+    exit (Invoke-ActionMode)
 }
 
 if ($NoGui) {

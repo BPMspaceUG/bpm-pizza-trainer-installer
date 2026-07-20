@@ -99,7 +99,7 @@ if ($homeRoot) {
     }
 }
 
-foreach ($cmd in @('git', 'winget', 'python', 'code', 'wsl')) {
+foreach ($cmd in @('git', 'winget', 'python', 'code', 'wsl', 'zip')) {
     if (Test-CommandAvailable -Name $cmd) {
         Write-Ok "Found command: $cmd"
     } else {
@@ -109,6 +109,7 @@ foreach ($cmd in @('git', 'winget', 'python', 'code', 'wsl')) {
             'python' { 'python is missing. Script 03 cannot prepare the trainer environment until Python 3.10+ is installed.' }
             'code' { 'VS Code CLI (code) is missing. Script 02 cannot install extensions automatically.' }
             'wsl' { 'wsl is missing. Script 01 cannot prepare the WSL environment.' }
+            'zip' { 'zip is missing. 00-setup.ps1 will attempt to install GnuWin32.Zip for the Git Bash fallback.' }
             default { "$cmd is missing." }
         }
         $warnings.Add($message)

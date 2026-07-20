@@ -97,7 +97,7 @@ fi
 
 step "Checking required commands"
 
-for cmd in git python3 bash curl; do
+for cmd in git python3 bash curl zip; do
     if has_command "$cmd"; then
         ok "Found command: $cmd"
     else
@@ -113,6 +113,9 @@ for cmd in git python3 bash curl; do
                 ;;
             curl)
                 WARNINGS+=("curl is missing. Some network checks and remote installer paths will be limited.")
+                ;;
+            zip)
+                WARNINGS+=("zip is missing. Install it with your package manager (e.g. sudo apt-get install zip).")
                 ;;
         esac
         warn "Missing command: $cmd"

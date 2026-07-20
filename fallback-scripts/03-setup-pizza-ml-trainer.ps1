@@ -151,7 +151,7 @@ function Load-CheckpointState {
             }
         }
     } catch {
-        Write-Warn "Could not load checkpoint file at ${CheckpointPath}: $_"
+        Write-Warn ("Could not load checkpoint file at {0}: {1}" -f $CheckpointPath, $_)
         Initialize-CheckpointState
     }
 }

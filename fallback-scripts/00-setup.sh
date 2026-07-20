@@ -10,6 +10,15 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LEARNING_DIR="$HOME/Learning"
 SKIP_PREFLIGHT=0
+ACTION=""
+REMOVE_MODULES=0
+GIT_CLEAN=0
+REINSTALL=0
+REMOVE_PYTHON_ENV=0
+REMOVE_REPOS=0
+DRY_RUN=0
+PIZZA_REPO_URL=""
+NONINTERACTIVE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -17,8 +26,41 @@ while [[ $# -gt 0 ]]; do
             SKIP_PREFLIGHT=1
             shift
             ;;
+        --action)
+            ACTION="$2"
+            NONINTERACTIVE=1
+            shift 2
+            ;;
+        --remove-modules)
+            REMOVE_MODULES=1
+            shift
+            ;;
+        --git-clean)
+            GIT_CLEAN=1
+            shift
+            ;;
+        --reinstall)
+            REINSTALL=1
+            shift
+            ;;
+        --remove-python-env)
+            REMOVE_PYTHON_ENV=1
+            shift
+            ;;
+        --remove-repos)
+            REMOVE_REPOS=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --pizza-repo-url)
+            PIZZA_REPO_URL="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: bash 00-setup.sh [--skip-preflight]"
+            echo "Usage: bash 00-setup.sh [--skip-preflight] [--action <name>]"
             exit 0
             ;;
         *)
@@ -32,8 +74,6 @@ done
 # prompt_url=1 means ask for URL at runtime if not cloned (e.g. pizza-ml)
 REPOS=(
     "https://github.com/BPMspaceUG/bpm-CodingAgentConfigCopy|$LEARNING_DIR/bpm-CodingAgentConfigCopy|1||0"
-    "https://github.com/BPMspaceUG/voice-web-exercise|$LEARNING_DIR/voice-web-exercise|0||0"
-    "https://github.com/BPMspaceUG/voice-agent-exercise|$LEARNING_DIR/voice-agent-exercise|0||0"
     "https://github.com/BPMspaceUG/bpm-pizza-ml|$LEARNING_DIR/pizza-ml|0|03-setup-pizza-ml-trainer.sh|0"
 )
 
@@ -155,7 +195,6 @@ PACKAGE_DEFS=(
     "Microsoft.VisualStudioCode|code|VS Code|special:vscode|cask:visual-studio-code"
     "Tailscale.Tailscale|tailscale|Tailscale|special:tailscale|cask:tailscale"
     "Docker.DockerDesktop|docker|Docker Desktop|special:docker|cask:docker"
-    "Ollama.Ollama|ollama|Ollama|special:ollama|cask:ollama"
     "Microsoft.PowerShell|pwsh|PowerShell|special:powershell|cask:powershell"
     "Anthropic.ClaudeCode|claude|Claude Code (CLI)|npm:@anthropic-ai/claude-code|npm:@anthropic-ai/claude-code"
     "OpenAI.Codex|codex|OpenAI Codex (CLI)|npm:@openai/codex|npm:@openai/codex"
@@ -250,15 +289,6 @@ install_docker() {
     fi
     sudo usermod -aG docker "$USER" 2>/dev/null || true
     log_info "You may need to log out and back in for docker group to take effect."
-}
-
-install_ollama() {
-    if [[ "$PLATFORM" == "macos" ]]; then
-        brew_install cask ollama
-        return
-    fi
-    log_info "Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh
 }
 
 install_powershell() {
@@ -385,6 +415,8 @@ show_menu() {
     echo -e "  |  [3] Clone / update repos               |"
     echo -e "  |  [4] Run full setup  (1+2+3+scripts)    |"
     echo -e "  |  [5] Cleanup repos                      |"
+    echo -e "  |  [6] Update installed packages          |"
+    echo -e "  |  [7] Configure coding agents (OpenRouter)|"
     echo -e "  |  [Q] Quit                               |"
     echo -e "  |                                         |"
     echo -e "  +==========================================+${RESET}"
@@ -486,7 +518,6 @@ do_install_package() {
         special:vscode)     install_vscode ;;
         special:tailscale)  install_tailscale ;;
         special:docker)     install_docker ;;
-        special:ollama)     install_ollama ;;
         special:powershell) install_powershell ;;
         special:chrome)     install_chrome ;;
         npm:*)
@@ -496,6 +527,322 @@ do_install_package() {
             log_warn "No install method defined for $winget_id — skipping"
             ;;
     esac
+}
+
+# ─────────────────────────────────────────────────────────────
+# Option 6 — Update installed packages
+# ─────────────────────────────────────────────────────────────
+#
+# Updates are driven strictly from PACKAGE_DEFS, never a blanket
+# "upgrade everything on this machine" — the installer only touches
+# what it installed.
+pkg_upgrade() {
+    # args: apt_name dnf_name
+    case "$PKG_MGR" in
+        apt)  sudo apt-get install -y --only-upgrade "$1" ;;
+        dnf)  sudo dnf upgrade -y "$2" ;;
+        *)    log_warn "pkg_upgrade: no package manager available for $1" ; return 1 ;;
+    esac
+}
+
+brew_upgrade() {
+    # args: type(formula|cask) name
+    local type="$1" name="$2"
+    if [ "$type" = "cask" ]; then
+        brew upgrade --cask "$name" 2>&1 | grep -v "already installed" || true
+    else
+        brew upgrade "$name" 2>&1 | grep -v "already installed" || true
+    fi
+}
+
+do_update_package() {
+    local winget_id="$1" method="$2"
+
+    case "$method" in
+        skip:*)
+            log_warn "Skipping $winget_id: ${method#skip:}"
+            ;;
+        pkg:*:*)
+            local apt_pkg dnf_pkg
+            apt_pkg="$(echo "${method#pkg:}" | cut -d: -f1)"
+            dnf_pkg="$(echo "${method#pkg:}" | cut -d: -f2)"
+            pkg_upgrade "$apt_pkg" "$dnf_pkg"
+            ;;
+        formula:*)
+            brew_upgrade formula "${method#formula:}"
+            ;;
+        cask:*)
+            brew_upgrade cask "${method#cask:}"
+            ;;
+        # The special installers all fetch the current release, so re-running
+        # them IS the update path.
+        special:nodejs)     install_nodejs ;;
+        special:vscode)     install_vscode ;;
+        special:tailscale)  install_tailscale ;;
+        special:docker)     install_docker ;;
+        special:powershell) install_powershell ;;
+        special:chrome)     install_chrome ;;
+        npm:*)
+            install_npm_global "${method#npm:}@latest"
+            ;;
+        *)
+            log_warn "No update method defined for $winget_id — skipping"
+            ;;
+    esac
+}
+
+update_packages() {
+    log_step "Updating installed packages"
+
+    local updated=0 skipped=0
+
+    for def in "${PACKAGE_DEFS[@]}"; do
+        local winget_id check_cmd linux_method brew_method active_method
+        winget_id="$(echo "$def" | cut -d'|' -f1)"
+        check_cmd="$(echo "$def" | cut -d'|' -f2)"
+        linux_method="$(echo "$def" | cut -d'|' -f4)"
+        brew_method="$(echo "$def" | cut -d'|' -f5)"
+
+        if [[ "$PKG_MGR" == "brew" ]]; then
+            active_method="$brew_method"
+        else
+            active_method="$linux_method"
+        fi
+
+        # Not available on this platform at all — never suggest installing it.
+        if [[ "$active_method" == skip:* ]]; then
+            log_info "$winget_id not available on this platform: ${active_method#skip:}"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        # Only update what is actually present — updating a missing package
+        # would silently turn this into an install.
+        if ! is_installed "$check_cmd"; then
+            log_info "$winget_id not installed — skipping (use option [2] to install)"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        if [ "$DRY_RUN" = "1" ]; then
+            log_info "[dry-run] would update $winget_id via ${active_method}"
+            updated=$((updated + 1))
+            continue
+        fi
+
+        log_step "Updating $winget_id"
+        if do_update_package "$winget_id" "$active_method"; then
+            log_ok "$winget_id up to date."
+            updated=$((updated + 1))
+        else
+            record_failure "$winget_id update may have failed — check output above."
+        fi
+    done
+
+    # pnpm (npm global, all platforms)
+    if command -v pnpm &>/dev/null; then
+        if [ "$DRY_RUN" = "1" ]; then
+            log_info "[dry-run] would update pnpm via npm install -g pnpm@latest"
+        else
+            log_step "Updating pnpm (npm global)"
+            install_npm_global "pnpm@latest"
+        fi
+    else
+        log_info "pnpm not installed — skipping"
+        skipped=$((skipped + 1))
+    fi
+
+    echo ""
+    log_info "Update pass complete: $updated updated, $skipped skipped (not installed or unavailable)."
+
+    # The OpenRouter balance check runs on update too, so a trainee finds out
+    # their credit ran dry here rather than mid-exercise.
+    if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+        echo ""
+        log_step "Checking OpenRouter balance"
+        openrouter_check_key "$OPENROUTER_API_KEY" || \
+            log_warn "OpenRouter key is missing or invalid — re-run option [7] to fix."
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# Option 7 — Coding agents via OpenRouter
+# ─────────────────────────────────────────────────────────────
+#
+# One OpenRouter key drives both CLIs. OpenRouter serves an
+# Anthropic-compatible /messages endpoint (Claude Code) and an
+# OpenAI Responses endpoint /responses (Codex), so neither CLI
+# needs a shim.
+OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+OPENROUTER_CLAUDE_MODEL="deepseek/deepseek-v4-pro"
+OPENROUTER_CODEX_MODEL="z-ai/glm-5.2"
+
+# Validate a key and print the account balance.
+# Returns 0 when the key is accepted, 1 otherwise.
+openrouter_check_key() {
+    local key="$1" body http
+
+    body="$(curl -s -m 20 -w $'\n%{http_code}' \
+        "$OPENROUTER_BASE_URL/credits" \
+        -H "Authorization: Bearer $key" 2>/dev/null)" || {
+        log_warn "Could not reach OpenRouter to validate the key (network problem?)."
+        return 1
+    }
+
+    http="$(printf '%s' "$body" | tail -n1)"
+    body="$(printf '%s' "$body" | sed '$d')"
+
+    if [ "$http" != "200" ]; then
+        log_warn "OpenRouter rejected the key (HTTP $http)."
+        return 1
+    fi
+
+    log_ok "OpenRouter key is valid."
+
+    # Field names are not pinned by us — print what we recognise, and fall
+    # back to the raw payload so the trainee always sees the balance.
+    python3 - "$body" <<'PY' 2>/dev/null || echo "  Balance response: $body"
+import json, sys
+d = json.loads(sys.argv[1])
+d = d.get("data", d)
+total = d.get("total_credits", d.get("limit"))
+used  = d.get("total_usage", d.get("usage"))
+if total is not None and used is not None:
+    print(f"  Credits purchased: ${float(total):.2f}")
+    print(f"  Credits used:      ${float(used):.2f}")
+    print(f"  Remaining:         ${float(total) - float(used):.2f}")
+elif used is not None:
+    print(f"  Credits used: ${float(used):.2f} (no limit set — pay-as-you-go)")
+else:
+    print(f"  Balance response: {json.dumps(d)}")
+PY
+    return 0
+}
+
+# Prompt for a key until one validates, or the trainee gives up.
+openrouter_prompt_key() {
+    local key
+    while true; do
+        echo "" >&2
+        echo -e "  ${CYAN}Get a key at https://openrouter.ai/keys${RESET}" >&2
+        read -rp "  Paste your OpenRouter API key (blank to skip): " key
+        if [ -z "$key" ]; then
+            return 1
+        fi
+        if openrouter_check_key "$key" >&2; then
+            printf '%s' "$key"
+            return 0
+        fi
+        log_warn "That key did not work — try again, or press Enter to skip." >&2
+    done
+}
+
+# Persist the key so Codex (which reads it via env_key) can find it.
+openrouter_persist_key() {
+    local key="$1" profile="$HOME/.bashrc"
+    [ -n "${ZSH_VERSION:-}" ] && profile="$HOME/.zshrc"
+
+    if grep -q '^export OPENROUTER_API_KEY=' "$profile" 2>/dev/null; then
+        # Replace in place; use a non-/ delimiter since keys contain no '|'
+        sed -i "s|^export OPENROUTER_API_KEY=.*|export OPENROUTER_API_KEY='$key'|" "$profile"
+    else
+        printf "\n# Added by pizza-trainer setup\nexport OPENROUTER_API_KEY='%s'\n" "$key" >> "$profile"
+    fi
+    export OPENROUTER_API_KEY="$key"
+    log_ok "Key saved to $profile (open a new shell to pick it up)."
+}
+
+# Merge the OpenRouter env block into ~/.claude/settings.json without
+# discarding any settings the trainee already has.
+openrouter_configure_claude() {
+    local key="$1" dir="$HOME/.claude"
+    mkdir -p "$dir"
+
+    OR_KEY="$key" OR_URL="$OPENROUTER_BASE_URL" OR_MODEL="$OPENROUTER_CLAUDE_MODEL" \
+    python3 - "$dir/settings.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError
+except (FileNotFoundError, ValueError, json.JSONDecodeError):
+    cfg = {}
+env = cfg.setdefault("env", {})
+env["ANTHROPIC_BASE_URL"] = os.environ["OR_URL"]
+env["ANTHROPIC_AUTH_TOKEN"] = os.environ["OR_KEY"]
+env["ANTHROPIC_MODEL"] = os.environ["OR_MODEL"]
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+    if [ $? -eq 0 ]; then
+        log_ok "Claude Code configured ($OPENROUTER_CLAUDE_MODEL)."
+    else
+        record_failure "Could not write $dir/settings.json"
+    fi
+}
+
+# Codex reads the key from the env var named by env_key, so the secret
+# stays out of config.toml.
+openrouter_configure_codex() {
+    local dir="$HOME/.codex" file
+    file="$dir/config.toml"
+    mkdir -p "$dir"
+
+    if [ -f "$file" ] && ! grep -q 'model_providers.openrouter' "$file"; then
+        cp "$file" "$file.bak"
+        log_info "Existing config.toml backed up to config.toml.bak"
+    fi
+
+    cat > "$file" <<EOF
+# Written by pizza-trainer setup — Codex via OpenRouter
+model = "$OPENROUTER_CODEX_MODEL"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "$OPENROUTER_BASE_URL"
+env_key = "OPENROUTER_API_KEY"
+EOF
+    log_ok "Codex configured ($OPENROUTER_CODEX_MODEL)."
+}
+
+setup_openrouter_agents() {
+    log_step "Configuring coding agents via OpenRouter"
+
+    local key="${OPENROUTER_API_KEY:-}"
+
+    if [ -n "$key" ]; then
+        log_info "Found an OpenRouter key in the environment — validating..."
+        if ! openrouter_check_key "$key"; then
+            log_warn "The existing key is no longer valid."
+            key=""
+        fi
+    else
+        log_info "No OpenRouter key found in the environment."
+    fi
+
+    if [ -z "$key" ]; then
+        if [ "$NONINTERACTIVE" -eq 1 ]; then
+            record_failure "No valid OpenRouter key and running non-interactively — skipping agent config."
+            return 1
+        fi
+        key="$(openrouter_prompt_key)" || {
+            log_warn "Skipped — coding agents left unconfigured."
+            return 1
+        }
+    fi
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[dry-run] would configure Claude Code ($OPENROUTER_CLAUDE_MODEL) and Codex ($OPENROUTER_CODEX_MODEL)"
+        return 0
+    fi
+
+    openrouter_persist_key "$key"
+    openrouter_configure_claude "$key"
+    openrouter_configure_codex
 }
 
 install_missing() {
@@ -558,7 +905,14 @@ sync_repos() {
         # Resolve URL — may need to prompt (e.g. pizza-ml)
         if [ -z "$url" ] && [ ! -d "$dir/.git" ]; then
             if [ "$prompt_url" = "1" ]; then
-                read -rp "  Enter Git URL for $name (or press Enter to skip): " url
+                if [ -n "$PIZZA_REPO_URL" ]; then
+                    url="$PIZZA_REPO_URL"
+                elif [ "$NONINTERACTIVE" = "1" ]; then
+                    log_warn "$name has no URL and action mode is non-interactive — skipping"
+                    continue
+                else
+                    read -rp "  Enter Git URL for $name (or press Enter to skip): " url
+                fi
                 if [ -z "$url" ]; then
                     log_warn "$name has no URL — skipping"
                     continue
@@ -572,30 +926,42 @@ sync_repos() {
         echo -e "  ${GRAY}$url${RESET}"
 
         if [ -d "$dir/.git" ]; then
-            log_info "Pulling latest changes..."
-            if git -C "$dir" pull; then
-                log_ok "Updated: $dir"
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "[dry-run] Would pull latest changes..."
             else
-                record_failure "$name: git pull failed — check for conflicts"
+                log_info "Pulling latest changes..."
+                if git -C "$dir" pull; then
+                    log_ok "Updated: $dir"
+                else
+                    record_failure "$name: git pull failed — check for conflicts"
+                fi
             fi
         else
-            log_info "Cloning..."
-            if git clone "$url" "$dir"; then
-                log_ok "Cloned to: $dir"
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "[dry-run] Would clone repository..."
             else
-                log_fail "git clone failed — skipping install step"
-                record_failure "$name: git clone failed"
-                continue
+                log_info "Cloning..."
+                if git clone "$url" "$dir"; then
+                    log_ok "Cloned to: $dir"
+                else
+                    log_fail "git clone failed — skipping install step"
+                    record_failure "$name: git clone failed"
+                    continue
+                fi
             fi
         fi
 
         # Run install.sh if flagged (e.g. bpm-CodingAgentConfigCopy)
         if [ "$run_install_sh" = "1" ] && [ -f "$dir/install.sh" ]; then
-            log_info "Running install.sh..."
-            if (cd "$dir" && bash install.sh); then
-                log_ok "install.sh completed in $name"
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "[dry-run] Would run install.sh..."
             else
-                record_failure "install.sh failed in $name"
+                log_info "Running install.sh..."
+                if (cd "$dir" && bash install.sh); then
+                    log_ok "install.sh completed in $name"
+                else
+                    record_failure "install.sh failed in $name"
+                fi
             fi
         fi
 
@@ -603,6 +969,13 @@ sync_repos() {
         if [ -n "$setup_script" ]; then
             local script_path="$SCRIPT_DIR/$setup_script"
             if [ -f "$script_path" ]; then
+                if [ "$NONINTERACTIVE" = "1" ]; then
+                    if [ "$DRY_RUN" = "1" ]; then
+                        log_info "[dry-run] Would skip $setup_script in non-interactive action mode. Use pizza-trainer trainer separately."
+                    else
+                        log_info "Skipping $setup_script in non-interactive action mode. Use pizza-trainer trainer separately."
+                    fi
+                else
                 read -rp "  Run $setup_script for $name now? [Y/n] " run_s
                 if [[ "${run_s,,}" != n* ]]; then
                     read -rp "  Use CUDA (GPU) build of PyTorch? [y/N] " use_cuda
@@ -625,6 +998,7 @@ sync_repos() {
                         record_failure "$name: post-setup verification failed"
                     fi
                 fi
+                fi
             else
                 record_failure "$setup_script not found in $SCRIPT_DIR"
             fi
@@ -634,25 +1008,29 @@ sync_repos() {
         local pm
         pm="$(detect_repo_pkg_manager "$dir")"
         if [ -n "$pm" ]; then
-            log_info "Detected package manager: $pm — running $pm install"
-            if [ "$pm" = "pnpm" ]; then
-                ensure_pnpm
-            fi
-            if command -v "$pm" &>/dev/null; then
-                if (cd "$dir" && "$pm" install); then
-                    log_ok "$pm install completed in $name"
-                else
-                    record_failure "$pm install failed in $name"
-                fi
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "[dry-run] Would run $pm install"
             else
-                record_failure "$pm not found on PATH — run '$pm install' manually in $dir"
+                log_info "Detected package manager: $pm — running $pm install"
+                if [ "$pm" = "pnpm" ]; then
+                    ensure_pnpm
+                fi
+                if command -v "$pm" &>/dev/null; then
+                    if (cd "$dir" && "$pm" install); then
+                        log_ok "$pm install completed in $name"
+                    else
+                        record_failure "$pm install failed in $name"
+                    fi
+                else
+                    record_failure "$pm not found on PATH — run '$pm install' manually in $dir"
+                fi
             fi
         fi
     done
 }
 
 # ─────────────────────────────────────────────────────────────
-# Script 02 equivalent — VS Code extensions + CAC
+# Script 02 / 02b equivalents — VS Code extensions and CAC (prompted separately)
 # ─────────────────────────────────────────────────────────────
 setup_vscode_extensions() {
     log_step "Installing VS Code AI extensions (script 02 equivalent)"
@@ -739,81 +1117,232 @@ cleanup_repos() {
     esac
 
     for entry in "${REPOS[@]}"; do
-        local url dir name
-        IFS='|' read -r url dir _ _ _ <<< "$entry"
-        name="$(basename "$dir")"
-        if [ ! -d "$dir" ]; then log_warn "$name not found — skipping"; continue; fi
-        log_info "$name"
+        cleanup_repo_entry "$entry" "$do_modules" "$do_reinstall" "$do_git" "$do_python" "$do_remove_repos"
+    done
+}
 
-        if [ "$do_remove_repos" = "1" ]; then
+cleanup_repo_entry() {
+    local entry="$1" do_modules="$2" do_reinstall="$3" do_git="$4" do_python="$5" do_remove_repos="$6"
+    local url dir name
+    IFS='|' read -r url dir _ _ _ <<< "$entry"
+    name="$(basename "$dir")"
+    if [ ! -d "$dir" ]; then log_warn "$name not found — skipping"; return; fi
+    log_info "$name"
+
+    if [ "$do_remove_repos" = "1" ]; then
+        if [ "$DRY_RUN" = "1" ]; then
+            log_info "  [dry-run] Would remove cloned repository directory..."
+        else
             log_info "  Removing cloned repository directory..."
             rm -rf "$dir"
             log_ok "  repository removed"
-            continue
         fi
+        return
+    fi
 
-        if [ "$do_modules" = "1" ]; then
-            if [ -d "$dir/node_modules" ]; then
+    if [ "$do_modules" = "1" ]; then
+        if [ -d "$dir/node_modules" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "  [dry-run] Would remove node_modules..."
+            else
                 log_info "  Removing node_modules..."
                 rm -rf "$dir/node_modules"
                 log_ok "  node_modules removed"
-            else
-                log_info "  node_modules not present"
             fi
+        else
+            log_info "  node_modules not present"
         fi
+    fi
 
-        if [ "$do_python" = "1" ]; then
-            if [ -d "$dir/venv" ]; then
+    if [ "$do_python" = "1" ]; then
+        if [ -d "$dir/venv" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "  [dry-run] Would remove venv/..."
+            else
                 log_info "  Removing venv/..."
                 rm -rf "$dir/venv"
                 log_ok "  venv removed"
             fi
-            if [ -d "$dir/data" ]; then
-                if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 && [ -n "$(git -C "$dir" ls-files -- data 2>/dev/null)" ]; then
-                    if [ -d "$dir/data/_food101_raw" ]; then
-                        log_info "  Removing data/_food101_raw/..."
-                        rm -rf "$dir/data/_food101_raw"
-                        log_ok "  data/_food101_raw removed"
-                    fi
-                    log_info "  data/ contains tracked files — leaving repository data in place"
-                else
-                    log_info "  Removing data/..."
-                    rm -rf "$dir/data"
-                    log_ok "  data/ removed"
-                fi
+        fi
+        if [ -d "$dir/data" ]; then
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "  [dry-run] Would remove data/..."
+            else
+                log_info "  Removing data/..."
+                rm -rf "$dir/data"
+                log_ok "  data/ removed"
             fi
-            local pth_count=0
-            while IFS= read -r pth; do
+        fi
+        local pth_count=0
+        while IFS= read -r pth; do
+            if [ "$DRY_RUN" = "1" ]; then
+                log_info "  [dry-run] Would remove $(basename "$pth")"
+            else
                 rm -f "$pth"
                 log_ok "  Removed $(basename "$pth")"
-                pth_count=$((pth_count+1))
-            done < <(find "$dir" -maxdepth 1 -name "*.pth" -type f 2>/dev/null)
-            [ "$pth_count" -eq 0 ] && log_info "  No .pth files found"
-        fi
+            fi
+            pth_count=$((pth_count+1))
+        done < <(find "$dir" -maxdepth 1 -name "*.pth" -type f 2>/dev/null)
+        [ "$pth_count" -eq 0 ] && log_info "  No .pth files found"
+    fi
 
-        if [ "$do_git" = "1" ]; then
+    if [ "$do_git" = "1" ]; then
+        if [ "$DRY_RUN" = "1" ]; then
+            log_info "  [dry-run] Would run git clean -fd..."
+        else
             log_info "  Running git clean -fd..."
             git -C "$dir" clean -fd
         fi
+        if git -C "$dir" rev-parse --git-dir >/dev/null 2>&1 && [ -n "$(git -C "$dir" ls-files -- data 2>/dev/null)" ]; then
+            if [ -d "$dir/data/_food101_raw" ]; then
+                log_info "  Removing data/_food101_raw/..."
+                rm -rf "$dir/data/_food101_raw"
+                log_ok "  data/_food101_raw removed"
+            fi
+            log_info "  data/ contains tracked files — leaving repository data in place"
+        else
+            log_info "  Removing data/..."
+            rm -rf "$dir/data"
+            log_ok "  data/ removed"
+        fi
+    fi
 
-        if [ "$do_reinstall" = "1" ]; then
-            local pm
-            pm="$(detect_repo_pkg_manager "$dir")"
-            if [ -n "$pm" ]; then
-                [ "$pm" = "pnpm" ] && ensure_pnpm
-                if command -v "$pm" &>/dev/null; then
+    if [ "$do_reinstall" = "1" ]; then
+        local pm
+        pm="$(detect_repo_pkg_manager "$dir")"
+        if [ -n "$pm" ]; then
+            [ "$pm" = "pnpm" ] && ensure_pnpm
+            if command -v "$pm" &>/dev/null; then
+                if [ "$DRY_RUN" = "1" ]; then
+                    log_info "  [dry-run] Would run $pm install..."
+                else
                     log_info "  Running $pm install..."
                     if (cd "$dir" && "$pm" install); then
                         log_ok "  $pm install done"
                     else
                         log_warn "  $pm install failed"
                     fi
+                fi
+            else
+                log_warn "  $pm not found on PATH"
+            fi
+        fi
+    fi
+}
+
+show_repo_status() {
+    log_step "Checking repositories"
+    for entry in "${REPOS[@]}"; do
+        local url dir name
+        IFS='|' read -r url dir _ _ _ <<< "$entry"
+        name="$(basename "$dir")"
+        local status="Not cloned"
+        if [ -d "$dir/.git" ]; then
+            status="Cloned"
+            if [[ "$name" == "pizza-ml" ]]; then
+                if [ -f "$dir/venv/bin/python" ]; then
+                    if "$dir/venv/bin/python" -c "import torch" &>/dev/null; then
+                        status="Cloned | venv OK"
+                    else
+                        status="Cloned | venv no torch"
+                    fi
                 else
-                    log_warn "  $pm not found on PATH"
+                    status="Cloned | venv missing"
                 fi
             fi
         fi
+        if [ -d "$dir/.git" ]; then
+            echo -e "  ${GREEN}[OK]${RESET} $name"
+        else
+            echo -e "  ${YELLOW}[--]${RESET} $name"
+        fi
+        echo -e "       ${GRAY}$status${RESET}"
+        echo -e "       ${GRAY}$dir${RESET}"
     done
+}
+
+install_missing_noninteractive() {
+    check_packages
+    if [ ${#MISSING_PACKAGES[@]} -eq 0 ]; then
+        log_ok "All packages already installed."
+        return 0
+    fi
+    for id in "${MISSING_PACKAGES[@]}"; do
+        log_step "Installing $id"
+        if do_install_package "$id"; then
+            log_ok "$id installed."
+        else
+            record_failure "$id installation failed"
+        fi
+    done
+}
+
+full_setup_noninteractive() {
+    reset_failures
+    echo ""
+    echo -e "  ${CYAN}Running full environment setup...${RESET}"
+    if [ "$DRY_RUN" = "1" ]; then
+        check_packages
+        if [ ${#MISSING_PACKAGES[@]} -eq 0 ]; then
+            log_ok "All packages already installed."
+        else
+            log_step "Dry-run package installation"
+            for id in "${MISSING_PACKAGES[@]}"; do
+                log_info "[dry-run] Would install $id"
+            done
+        fi
+    else
+        install_missing_noninteractive
+    fi
+    sync_repos
+    show_run_summary "Full setup"
+}
+
+run_action_mode() {
+    case "$ACTION" in
+        packages-status)
+            check_packages
+            ;;
+        packages-install)
+            reset_failures
+            install_missing_noninteractive
+            show_run_summary "Package installation"
+            ;;
+        packages-update)
+            reset_failures
+            update_packages
+            show_run_summary "Package update"
+            ;;
+        coding-agents-config)
+            reset_failures
+            setup_openrouter_agents
+            show_run_summary "Coding agent setup"
+            ;;
+        repos-status)
+            show_repo_status
+            ;;
+        repos-sync)
+            reset_failures
+            sync_repos
+            show_run_summary "Repository sync"
+            ;;
+        repos-cleanup)
+            if [ "$REMOVE_MODULES" -eq 0 ] && [ "$GIT_CLEAN" -eq 0 ] && [ "$REINSTALL" -eq 0 ] && [ "$REMOVE_PYTHON_ENV" -eq 0 ] && [ "$REMOVE_REPOS" -eq 0 ]; then
+                log_fail "repos-cleanup requires at least one cleanup flag"
+                return 1
+            fi
+            for entry in "${REPOS[@]}"; do
+                cleanup_repo_entry "$entry" "$REMOVE_MODULES" "$REINSTALL" "$GIT_CLEAN" "$REMOVE_PYTHON_ENV" "$REMOVE_REPOS"
+            done
+            ;;
+        full-setup)
+            full_setup_noninteractive
+            ;;
+        *)
+            log_fail "Unknown action: $ACTION"
+            return 1
+            ;;
+    esac
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -882,6 +1411,11 @@ fi
 detect_platform
 detect_pkg_manager
 
+if [ -n "$ACTION" ]; then
+    run_action_mode
+    exit $?
+fi
+
 while true; do
     show_menu
     read -rp "  Select option: " choice
@@ -912,6 +1446,20 @@ while true; do
             ;;
         5)
             cleanup_repos
+            echo ""
+            read -rp "  Press Enter to return to menu..." _dummy
+            ;;
+        6)
+            reset_failures
+            update_packages
+            show_run_summary "Package update"
+            echo ""
+            read -rp "  Press Enter to return to menu..." _dummy
+            ;;
+        7)
+            reset_failures
+            setup_openrouter_agents
+            show_run_summary "Coding agent setup"
             echo ""
             read -rp "  Press Enter to return to menu..." _dummy
             ;;

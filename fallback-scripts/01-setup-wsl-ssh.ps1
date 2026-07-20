@@ -381,5 +381,6 @@ Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "  1. Open WSL:    wsl -d Ubuntu"
 Write-Host "  2. Test SSH:    ssh localhost"
 Write-Host "  3. If you opened port 22, prefer SSH keys before using remote access"
-Write-Host "  4. Run Script2: .\02-setup-coding-agents.ps1"
+Write-Host "  4. Run Script2: .\02-setup-coding-agents.ps1  (VS Code AI extensions)"
+Write-Host "  5. Run Script2b: .\02b-setup-cac.ps1          (CAC CLI)"
 Write-Host ""
