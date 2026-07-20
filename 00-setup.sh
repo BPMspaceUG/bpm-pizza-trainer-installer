@@ -415,6 +415,7 @@ show_menu() {
     echo -e "  |  [3] Clone / update repos               |"
     echo -e "  |  [4] Run full setup  (1+2+3+scripts)    |"
     echo -e "  |  [5] Cleanup repos                      |"
+    echo -e "  |  [6] Update installed packages          |"
     echo -e "  |  [Q] Quit                               |"
     echo -e "  |                                         |"
     echo -e "  +==========================================+${RESET}"
@@ -525,6 +526,133 @@ do_install_package() {
             log_warn "No install method defined for $winget_id — skipping"
             ;;
     esac
+}
+
+# ─────────────────────────────────────────────────────────────
+# Option 6 — Update installed packages
+# ─────────────────────────────────────────────────────────────
+#
+# Updates are driven strictly from PACKAGE_DEFS, never a blanket
+# "upgrade everything on this machine" — the installer only touches
+# what it installed.
+pkg_upgrade() {
+    # args: apt_name dnf_name
+    case "$PKG_MGR" in
+        apt)  sudo apt-get install -y --only-upgrade "$1" ;;
+        dnf)  sudo dnf upgrade -y "$2" ;;
+        *)    log_warn "pkg_upgrade: no package manager available for $1" ; return 1 ;;
+    esac
+}
+
+brew_upgrade() {
+    # args: type(formula|cask) name
+    local type="$1" name="$2"
+    if [ "$type" = "cask" ]; then
+        brew upgrade --cask "$name" 2>&1 | grep -v "already installed" || true
+    else
+        brew upgrade "$name" 2>&1 | grep -v "already installed" || true
+    fi
+}
+
+do_update_package() {
+    local winget_id="$1" method="$2"
+
+    case "$method" in
+        skip:*)
+            log_warn "Skipping $winget_id: ${method#skip:}"
+            ;;
+        pkg:*:*)
+            local apt_pkg dnf_pkg
+            apt_pkg="$(echo "${method#pkg:}" | cut -d: -f1)"
+            dnf_pkg="$(echo "${method#pkg:}" | cut -d: -f2)"
+            pkg_upgrade "$apt_pkg" "$dnf_pkg"
+            ;;
+        formula:*)
+            brew_upgrade formula "${method#formula:}"
+            ;;
+        cask:*)
+            brew_upgrade cask "${method#cask:}"
+            ;;
+        # The special installers all fetch the current release, so re-running
+        # them IS the update path.
+        special:nodejs)     install_nodejs ;;
+        special:vscode)     install_vscode ;;
+        special:tailscale)  install_tailscale ;;
+        special:docker)     install_docker ;;
+        special:powershell) install_powershell ;;
+        special:chrome)     install_chrome ;;
+        npm:*)
+            install_npm_global "${method#npm:}@latest"
+            ;;
+        *)
+            log_warn "No update method defined for $winget_id — skipping"
+            ;;
+    esac
+}
+
+update_packages() {
+    log_step "Updating installed packages"
+
+    local updated=0 skipped=0
+
+    for def in "${PACKAGE_DEFS[@]}"; do
+        local winget_id check_cmd linux_method brew_method active_method
+        winget_id="$(echo "$def" | cut -d'|' -f1)"
+        check_cmd="$(echo "$def" | cut -d'|' -f2)"
+        linux_method="$(echo "$def" | cut -d'|' -f4)"
+        brew_method="$(echo "$def" | cut -d'|' -f5)"
+
+        if [[ "$PKG_MGR" == "brew" ]]; then
+            active_method="$brew_method"
+        else
+            active_method="$linux_method"
+        fi
+
+        # Not available on this platform at all — never suggest installing it.
+        if [[ "$active_method" == skip:* ]]; then
+            log_info "$winget_id not available on this platform: ${active_method#skip:}"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        # Only update what is actually present — updating a missing package
+        # would silently turn this into an install.
+        if ! is_installed "$check_cmd"; then
+            log_info "$winget_id not installed — skipping (use option [2] to install)"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        if [ "$DRY_RUN" = "1" ]; then
+            log_info "[dry-run] would update $winget_id via ${active_method}"
+            updated=$((updated + 1))
+            continue
+        fi
+
+        log_step "Updating $winget_id"
+        if do_update_package "$winget_id" "$active_method"; then
+            log_ok "$winget_id up to date."
+            updated=$((updated + 1))
+        else
+            record_failure "$winget_id update may have failed — check output above."
+        fi
+    done
+
+    # pnpm (npm global, all platforms)
+    if command -v pnpm &>/dev/null; then
+        if [ "$DRY_RUN" = "1" ]; then
+            log_info "[dry-run] would update pnpm via npm install -g pnpm@latest"
+        else
+            log_step "Updating pnpm (npm global)"
+            install_npm_global "pnpm@latest"
+        fi
+    else
+        log_info "pnpm not installed — skipping"
+        skipped=$((skipped + 1))
+    fi
+
+    echo ""
+    log_info "Update pass complete: $updated updated, $skipped skipped (not installed or unavailable)."
 }
 
 install_missing() {
@@ -990,6 +1118,11 @@ run_action_mode() {
             install_missing_noninteractive
             show_run_summary "Package installation"
             ;;
+        packages-update)
+            reset_failures
+            update_packages
+            show_run_summary "Package update"
+            ;;
         repos-status)
             show_repo_status
             ;;
@@ -1118,6 +1251,13 @@ while true; do
             ;;
         5)
             cleanup_repos
+            echo ""
+            read -rp "  Press Enter to return to menu..." _dummy
+            ;;
+        6)
+            reset_failures
+            update_packages
+            show_run_summary "Package update"
             echo ""
             read -rp "  Press Enter to return to menu..." _dummy
             ;;

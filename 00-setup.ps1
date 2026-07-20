@@ -15,7 +15,7 @@
 param(
     [switch]$NoGui,
     [switch]$SkipPreflight,
-    [ValidateSet('packages-status', 'packages-install', 'repos-status', 'repos-sync', 'repos-cleanup', 'full-setup')]
+    [ValidateSet('packages-status', 'packages-install', 'packages-update', 'repos-status', 'repos-sync', 'repos-cleanup', 'full-setup')]
     [string]$Action,
     [switch]$RemoveModules,
     [switch]$GitClean,
@@ -387,6 +387,63 @@ function Install-Packages {
     }
 }
 
+# Updates are driven strictly from packages.winget.json — never 'winget upgrade --all',
+# which would touch every application on the trainee's machine rather than just the
+# training set.
+function Update-Packages {
+    param(
+        [object[]]$StatusMap,
+        [switch]$DryRun
+    )
+
+    if (-not $StatusMap) { $StatusMap = Get-PackageStatus }
+
+    $updated = 0
+    $skipped = 0
+
+    foreach ($entry in $StatusMap) {
+        # Only update what is present — updating a missing package would silently
+        # turn this into an install.
+        if (-not $entry.Installed) {
+            Write-Info "$($entry.Id) not installed - skipping (use option [2] to install)"
+            $skipped++
+            continue
+        }
+
+        if ($DryRun) {
+            $how = if ($entry.Type -eq 'npm') { "npm install -g $($entry.NpmPkg)@latest" } else { "winget upgrade --id $($entry.Id)" }
+            Write-Info "[dry-run] would update $($entry.Id) via $how"
+            $updated++
+            continue
+        }
+
+        if ($entry.Type -eq 'npm') {
+            Write-Step "Updating $($entry.NpmPkg) (npm install -g $($entry.NpmPkg)@latest)"
+            npm install -g "$($entry.NpmPkg)@latest"
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "$($entry.NpmPkg) up to date."
+                $updated++
+            } else {
+                Add-RunFailure "$($entry.NpmPkg) update failed."
+            }
+        } else {
+            Write-Step "Updating $($entry.Id)"
+            winget upgrade --id $entry.Id --exact --silent --accept-package-agreements --accept-source-agreements
+            # winget exits non-zero when no upgrade is available; that is success here.
+            if ($LASTEXITCODE -eq 0) {
+                Write-Ok "$($entry.Id) up to date."
+                $updated++
+            } else {
+                Write-Info "$($entry.Id) - no applicable upgrade (winget exit $LASTEXITCODE)"
+                $skipped++
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Info "Update pass complete: $updated updated, $skipped skipped."
+}
+
 function Sync-Repos {
     param(
         [object[]]$RepoList,
@@ -727,6 +784,12 @@ function Invoke-ActionMode {
                 Install-Packages -Ids ($toInstall | ForEach-Object { $_.Id }) -StatusMap $toInstall
             }
             if (Show-RunSummary -Label 'Package installation') { return 0 }
+            return 2
+        }
+        'packages-update' {
+            Reset-RunFailures
+            Update-Packages -StatusMap (Get-PackageStatus) -DryRun:$DryRun
+            if (Show-RunSummary -Label 'Package update') { return 0 }
             return 2
         }
         'repos-status' {
@@ -1321,6 +1384,7 @@ function Show-TerminalMenu {
     Write-Host "  |  [3] Clone / update repos               |" -ForegroundColor Cyan
     Write-Host "  |  [4] Run full setup  (1+2+3+scripts)    |" -ForegroundColor Cyan
     Write-Host "  |  [5] Cleanup repos                      |" -ForegroundColor Cyan
+    Write-Host "  |  [6] Update installed packages          |" -ForegroundColor Cyan
     Write-Host "  |  [Q] Quit                               |" -ForegroundColor Cyan
     Write-Host "  |                                         |" -ForegroundColor Cyan
     Write-Host "  +==========================================+" -ForegroundColor Cyan
@@ -1499,6 +1563,12 @@ function Start-TerminalMode {
             }
             '5' {
                 Invoke-TerminalCleanup
+                Write-Host ""; Read-Host "  Press Enter to return"
+            }
+            '6' {
+                Reset-RunFailures
+                Update-Packages -StatusMap (Get-PackageStatus) -DryRun:$DryRun
+                [void](Show-RunSummary -Label 'Package update')
                 Write-Host ""; Read-Host "  Press Enter to return"
             }
             'Q' {

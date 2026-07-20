@@ -72,6 +72,7 @@ pizza-trainer [command] [flags]
 | `setup` / `full-setup` | Non-interactive full setup (packages + repos) |
 | `packages-status` | Show installed/missing package status |
 | `packages-install` | Install all missing packages |
+| `packages-update` | Update installed packages (manifest only, never system-wide) |
 | `repos-status` | Show repository clone status |
 | `repos-sync` | Clone or pull repositories |
 | `repos-cleanup` | Selectively clean or remove repositories |

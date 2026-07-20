@@ -37,6 +37,8 @@ func Run(args []string) error {
 		return runPackagesStatus(args[1:])
 	case "packages-install":
 		return runPackagesInstall(args[1:])
+	case "packages-update":
+		return runPackagesUpdate(args[1:])
 	case "repos-status":
 		return runReposStatus(args[1:])
 	case "repos-sync":
@@ -214,6 +216,10 @@ func runPackagesStatus(args []string) error {
 
 func runPackagesInstall(args []string) error {
 	return runSetupActionCommand("packages-install", args, nil)
+}
+
+func runPackagesUpdate(args []string) error {
+	return runSetupActionCommand("packages-update", args, nil)
 }
 
 func runReposStatus(args []string) error {
@@ -436,6 +442,7 @@ Commands:
 	full-setup        Run non-interactive full setup (packages + repos)
 	packages-status   Show package status
 	packages-install  Install all missing packages
+	packages-update   Update installed packages (manifest only, never system-wide)
 	repos-status      Show repository status
 	repos-sync        Clone or update repositories
 	repos-cleanup     Clean repositories or delete cloned repos with explicit flags

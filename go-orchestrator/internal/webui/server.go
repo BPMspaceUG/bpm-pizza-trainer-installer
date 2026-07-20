@@ -304,7 +304,7 @@ func (s *Server) runAction(root string, request actionRequest, writer io.Writer)
 	switch request.Action {
 	case "preflight":
 		return scripts.RunPreflightWithOptions(s.kind, actionRoot, scripts.RunOptions{Stdout: writer, Stderr: writer})
-	case "packages-status", "packages-install", "repos-status", "repos-sync", "repos-cleanup", "full-setup", "setup":
+	case "packages-status", "packages-install", "packages-update", "repos-status", "repos-sync", "repos-cleanup", "full-setup", "setup":
 		extraArgs := []string{}
 		if request.RemoveModules {
 			extraArgs = append(extraArgs, buildSetupFlag(s.kind, "remove-modules"))
