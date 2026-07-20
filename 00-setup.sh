@@ -946,18 +946,61 @@ openrouter_prompt_key() {
 }
 
 # Persist the key so Codex (which reads it via env_key) can find it.
-openrouter_persist_key() {
-    local key="$1" profile="$HOME/.bashrc"
-    [ -n "${ZSH_VERSION:-}" ] && profile="$HOME/.zshrc"
+# Which shell rc files should carry the key.
+#
+# Do NOT infer this from ZSH_VERSION/BASH_VERSION — those describe the
+# interpreter running *this script* (always bash), not the shell the trainee
+# actually logs into. Getting that wrong writes the key to a file their shell
+# never reads, and Codex then reports OPENROUTER_API_KEY as missing.
+openrouter_profile_files() {
+    local login_shell files=()
+    login_shell="$(getent passwd "$USER" 2>/dev/null | cut -d: -f7)"
+    [ -z "$login_shell" ] && login_shell="${SHELL:-/bin/bash}"
 
-    if grep -q '^export OPENROUTER_API_KEY=' "$profile" 2>/dev/null; then
-        # Replace in place; use a non-/ delimiter since keys contain no '|'
-        sed -i "s|^export OPENROUTER_API_KEY=.*|export OPENROUTER_API_KEY='$key'|" "$profile"
-    else
-        printf "\n# Added by pizza-trainer setup\nexport OPENROUTER_API_KEY='%s'\n" "$key" >> "$profile"
+    case "$(basename "$login_shell")" in
+        zsh)  files+=("$HOME/.zshrc") ;;
+        bash) files+=("$HOME/.bashrc") ;;
+        *)    files+=("$HOME/.profile") ;;
+    esac
+
+    # Also cover the other common shell if its rc already exists, so the key
+    # works whichever shell the trainee happens to open.
+    for extra in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$extra" ] && [[ ! " ${files[*]} " == *" $extra "* ]] && files+=("$extra")
+    done
+
+    printf '%s\n' "${files[@]}"
+}
+
+openrouter_persist_key() {
+    local key="$1" profile written=()
+
+    while IFS= read -r profile; do
+        [ -z "$profile" ] && continue
+        touch "$profile" 2>/dev/null || continue
+        if grep -q '^export OPENROUTER_API_KEY=' "$profile" 2>/dev/null; then
+            # Replace in place; use a non-/ delimiter since keys contain no '|'
+            sed -i "s|^export OPENROUTER_API_KEY=.*|export OPENROUTER_API_KEY='$key'|" "$profile"
+        else
+            printf "\n# Added by pizza-trainer setup\nexport OPENROUTER_API_KEY='%s'\n" "$key" >> "$profile"
+        fi
+        written+=("$profile")
+    done < <(openrouter_profile_files)
+
+    if [ ${#written[@]} -eq 0 ]; then
+        record_failure "Could not write the key to any shell profile."
+        return 1
     fi
+
     export OPENROUTER_API_KEY="$key"
-    log_ok "Key saved to $profile (open a new shell to pick it up)."
+
+    log_ok "Key saved to: ${written[*]}"
+    echo ""
+    log_warn "This shell does not have the key yet — the setup script runs in its own"
+    log_warn "process, so the export cannot reach the shell you launched it from."
+    echo -e "  Run:  ${WHITE}source ${written[0]}${RESET}   (or just open a new terminal)"
+    echo -e "  Check with:  ${WHITE}codex doctor${RESET}"
+    echo ""
 }
 
 # Merge the OpenRouter env block into ~/.claude/settings.json without
