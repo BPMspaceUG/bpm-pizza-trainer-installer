@@ -5,12 +5,13 @@
     Script 1: Install WSL2 + Ubuntu and configure OpenSSH Server.
 .DESCRIPTION
     Enables WSL2 Windows features, installs Ubuntu LTS, installs and starts
-    OpenSSH Server, and opens firewall port 22. Requires a reboot if WSL
-    features were not previously enabled.
+    OpenSSH Server, and opens firewall port 22 to the Tailscale network only.
+    Requires a reboot if WSL features were not previously enabled.
 .PARAMETER EnableLabWslDefaults
     Opt in to lab-style WSL user changes: empty password and passwordless sudo.
 .PARAMETER OpenFirewall
-    Open inbound Windows firewall port 22 for sshd without prompting.
+    Open inbound Windows firewall port 22 for sshd (Tailscale network only)
+    without prompting.
 .NOTES
     Run as Administrator. Reboot when prompted, then re-run to finalize.
 #>
@@ -275,17 +276,27 @@ try {
     if ($existingRule) {
         Write-Success "Firewall rule 'sshd' already exists"
         $firewallOpened = $true
-    } elseif ($OpenFirewall -or (Confirm-Action -Prompt 'Open inbound Windows Firewall port 22 for sshd?')) {
+    } elseif ($OpenFirewall -or (Confirm-Action -Prompt 'Open inbound Windows Firewall port 22 for sshd, restricted to the Tailscale network?')) {
+        # Scope the rule to Tailscale's CGNAT range (100.64.0.0/10) so only
+        # tailnet peers can reach sshd. Two reasons this beats an sshd_config
+        # ListenAddress: sshd still starts when Tailscale is down (a
+        # ListenAddress it cannot bind kills the service outright), and the
+        # rule holds whatever profile Windows assigns the Tailscale adapter.
+        #
+        # Tailscale SSH would be preferable, but its server component is
+        # Linux/macOS only — Windows cannot accept Tailscale SSH, so a
+        # tailnet-restricted OpenSSH is the closest equivalent.
         New-NetFirewallRule `
             -Name 'sshd' `
-            -DisplayName 'OpenSSH Server (sshd)' `
+            -DisplayName 'OpenSSH Server (sshd) - Tailscale only' `
             -Enabled True `
             -Direction Inbound `
             -Protocol TCP `
             -Action Allow `
-            -Profile Private `
+            -Profile Any `
+            -RemoteAddress '100.64.0.0/10' `
             -LocalPort 22 | Out-Null
-        Write-Success "Firewall rule created — port 22 open for inbound TCP on the Private profile"
+        Write-Success 'Firewall rule created — port 22 reachable only from the Tailscale network (100.64.0.0/10)'
         $firewallOpened = $true
     } else {
         Write-Warn 'Skipping firewall rule creation. sshd may still be usable locally, but inbound remote connections will remain blocked.'
@@ -356,7 +367,7 @@ if ($wslLabDefaultsApplied) {
 }
 
 if ($firewallOpened) {
-    Write-Host 'Windows firewall: inbound sshd rule present' -ForegroundColor White
+    Write-Host 'Windows firewall: inbound sshd rule present (Tailscale network only)' -ForegroundColor White
 } else {
     Write-Host 'Windows firewall: inbound sshd rule not created by this run' -ForegroundColor White
 }
@@ -380,7 +391,7 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "  1. Open WSL:    wsl -d Ubuntu"
 Write-Host "  2. Test SSH:    ssh localhost"
-Write-Host "  3. If you opened port 22, prefer SSH keys before using remote access"
+Write-Host "  3. sshd is reachable only over Tailscale (100.64.0.0/10); prefer SSH keys regardless"
 Write-Host "  4. Run Script2: .\02-setup-coding-agents.ps1  (VS Code AI extensions)"
 Write-Host "  5. Run Script2b: .\02b-setup-cac.ps1          (CAC CLI)"
 Write-Host ""

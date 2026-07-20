@@ -10,12 +10,12 @@ Bootstrap scripts and Go orchestrator (`pizza-trainer`) for the Pizza Trainer en
 >
 > - **remove the WSL user's password** (`passwd -d`) and grant **passwordless sudo**
 >   (`NOPASSWD:ALL`)
-> - **install and start Windows OpenSSH Server**, and **open inbound port 22** on all
->   firewall profiles, with no address restriction
+> - **install and start Windows OpenSSH Server**, and **open inbound port 22** —
+>   restricted to the Tailscale network (`100.64.0.0/10`)
 >
-> Anyone who can reach the machine on port 22 — on any network it joins — is a step away
-> from a root shell in the WSL environment. That trade is acceptable for a throwaway lab
-> VM used during a course. It is not acceptable on a laptop you use for anything else.
+> Anyone on the same tailnet is therefore a step away from a root shell in the WSL
+> environment. That trade is acceptable for a throwaway lab VM used during a course.
+> It is not acceptable on a laptop you use for anything else.
 >
 > Setup also pipes remote installer scripts into a shell (Docker, Tailscale, and the CAC
 > CLI) and prompts before doing so. Review [Security notes](#security-notes) before
@@ -313,7 +313,7 @@ No other script changes the machine's security posture.
 | --- | --- | --- |
 | WSL user password removed (`passwd -d`) | yes — or `-EnableLabWslDefaults` | The account has no password at all |
 | Passwordless sudo (`NOPASSWD:ALL`) | yes — same prompt | Any local shell can become root without asking |
-| Inbound port 22 opened on all firewall profiles | yes — or `-OpenFirewall` | Reachable on public/untrusted networks, not just the lab LAN |
+| Inbound port 22 opened, **restricted to the Tailscale network** (`100.64.0.0/10`) | yes — or `-OpenFirewall` | Only tailnet peers can reach sshd; not exposed to the local LAN or public networks |
 | OpenSSH Server installed, started, set to Automatic | **no — unconditional** | Running script 01 at all means the machine accepts SSH from boot onward |
 | No `sshd_config` written | n/a | No `ListenAddress` set, so sshd binds every interface by default |
 
@@ -325,6 +325,25 @@ account keeps its password.
 
 Skipping script 01 entirely leaves authentication untouched. Packages, repos and
 the trainer setup (`00-setup.*`, `03-setup-pizza-ml-trainer.*`) all work without it.
+
+### Reaching the machine over Tailscale
+
+Which mechanism you get depends on which flow you ran, because **Tailscale SSH's
+server component is Linux/macOS only — Windows cannot accept Tailscale SSH.**
+
+| Flow | Mechanism | Exposure |
+| --- | --- | --- |
+| `00-setup.sh` in WSL/Linux/macOS — option `[8]` | **Tailscale SSH** (`tailscale up --ssh`) | No OpenSSH server, no password, no open port at all |
+| `00-setup.ps1` / `01-setup-wsl-ssh.ps1` on Windows | Windows OpenSSH, firewall-scoped to `100.64.0.0/10` | Port 22 reachable only from tailnet peers |
+
+The WSL path is the safer of the two: the tailnet performs authentication and
+applies your access-control policy, so none of the password or port changes
+above are needed to reach it.
+
+> [!NOTE]
+> Tailscale's **default** access policy grants SSH between all devices on a
+> tailnet. If several trainee machines join the same tailnet, each can reach the
+> others. Use ACL tags to scope this if that is not what you want.
 
 ### Remote code execution
 

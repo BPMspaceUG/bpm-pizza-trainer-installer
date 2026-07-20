@@ -417,6 +417,7 @@ show_menu() {
     echo -e "  |  [5] Cleanup repos                      |"
     echo -e "  |  [6] Update installed packages          |"
     echo -e "  |  [7] Configure coding agents (OpenRouter)|"
+    echo -e "  |  [8] Enable Tailscale SSH               |"
     echo -e "  |  [Q] Quit                               |"
     echo -e "  |                                         |"
     echo -e "  +==========================================+${RESET}"
@@ -759,6 +760,117 @@ update_packages() {
         openrouter_configure_claude "$OPENROUTER_KEY_RESOLVED"
         openrouter_configure_codex
     fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# Option 8 — Tailscale SSH (Linux / WSL / macOS)
+# ─────────────────────────────────────────────────────────────
+#
+# Tailscale SSH's *server* component is Linux/macOS only — Windows cannot
+# accept Tailscale SSH. That is why this lives in the shell flow: when
+# 00-setup.sh runs inside WSL, the tailnet node IS the distro, so SSH should
+# land in WSL. The Windows flow restricts its own OpenSSH server to the
+# tailnet instead (see 01-setup-wsl-ssh.ps1).
+#
+# With Tailscale SSH the tailnet handles authentication and authorisation, so
+# this path needs no OpenSSH server, no password, and no open port 22.
+
+# Ensure tailscaled survives a WSL restart. Without [boot] systemd=true the
+# daemon does not come back, and Tailscale SSH silently stops working after
+# the first `wsl --shutdown`.
+ensure_wsl_systemd() {
+    if grep -qs 'systemd *= *true' /etc/wsl.conf; then
+        log_ok "systemd is enabled in /etc/wsl.conf — tailscaled will autostart."
+        return 0
+    fi
+
+    log_warn "systemd is not enabled in /etc/wsl.conf — tailscaled would not survive 'wsl --shutdown'."
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[dry-run] would add [boot] systemd=true to /etc/wsl.conf"
+        return 0
+    fi
+
+    if sudo python3 - <<'PY'
+import configparser, pathlib
+p = pathlib.Path('/etc/wsl.conf')
+cp = configparser.ConfigParser()
+cp.optionxform = str
+if p.exists():
+    cp.read(p)
+if not cp.has_section('boot'):
+    cp.add_section('boot')
+cp.set('boot', 'systemd', 'true')
+with p.open('w') as f:
+    cp.write(f)
+PY
+    then
+        log_ok "Enabled systemd in /etc/wsl.conf."
+        log_warn "Run 'wsl --shutdown' from Windows and reopen this distro for it to take effect."
+    else
+        record_failure "Could not write /etc/wsl.conf — enable [boot] systemd=true manually."
+    fi
+}
+
+setup_tailscale_ssh() {
+    log_step "Configuring Tailscale SSH"
+
+    if ! command -v tailscale &>/dev/null; then
+        record_failure "tailscale is not installed — run option [2] (install packages) first."
+        return 1
+    fi
+
+    case "$PLATFORM" in
+        wsl2*|linux*|macos) : ;;
+        *) log_warn "Tailscale SSH server is not supported on $PLATFORM."; return 1 ;;
+    esac
+
+    [[ "$PLATFORM" == wsl2* ]] && ensure_wsl_systemd
+
+    # Make sure the daemon is reachable before asking it to do anything.
+    if tailscale status 2>&1 | grep -qi 'failed to connect\|is tailscaled running'; then
+        log_info "tailscaled is not running — starting it..."
+        if [ "$DRY_RUN" != "1" ]; then
+            sudo systemctl enable --now tailscaled 2>/dev/null || \
+                record_failure "Could not start tailscaled — start it manually, then re-run."
+        fi
+    fi
+
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[dry-run] would enable Tailscale SSH on this node (interactive login if needed)"
+        return 0
+    fi
+
+    if tailscale status &>/dev/null; then
+        # Already on the tailnet — just advertise SSH.
+        log_info "Already logged in to the tailnet — enabling SSH on this node."
+        sudo tailscale set --ssh || record_failure "Could not enable Tailscale SSH."
+    else
+        if [ "$NONINTERACTIVE" -eq 1 ]; then
+            record_failure "Not logged in to Tailscale and running non-interactively — run option [8] interactively to authenticate."
+            return 1
+        fi
+        echo ""
+        log_info "Not logged in. Tailscale will print a login URL — open it in a browser to join the tailnet."
+        echo ""
+        sudo tailscale up --ssh || {
+            record_failure "tailscale up failed — see output above."
+            return 1
+        }
+    fi
+
+    # Tell the trainer how to actually reach this machine.
+    local ts_ip ts_name
+    ts_ip="$(tailscale ip -4 2>/dev/null | head -1)"
+    ts_name="$(tailscale status --json 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null)"
+
+    echo ""
+    log_ok "Tailscale SSH is enabled on this machine."
+    [ -n "$ts_name" ] && echo -e "  Reach it with:  ${WHITE}tailscale ssh ${USER}@${ts_name}${RESET}"
+    [ -n "$ts_ip" ]   && echo -e "  Or by IP:       ${WHITE}tailscale ssh ${USER}@${ts_ip}${RESET}"
+    echo ""
+    log_info "No OpenSSH server, password, or open port 22 is needed for this path —"
+    log_info "the tailnet handles authentication and access policy."
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -1435,6 +1547,11 @@ run_action_mode() {
             setup_openrouter_agents
             show_run_summary "Coding agent setup"
             ;;
+        tailscale-ssh)
+            reset_failures
+            setup_tailscale_ssh
+            show_run_summary "Tailscale SSH setup"
+            ;;
         repos-status)
             show_repo_status
             ;;
@@ -1577,6 +1694,13 @@ while true; do
             reset_failures
             setup_openrouter_agents
             show_run_summary "Coding agent setup"
+            echo ""
+            read -rp "  Press Enter to return to menu..." _dummy
+            ;;
+        8)
+            reset_failures
+            setup_tailscale_ssh
+            show_run_summary "Tailscale SSH setup"
             echo ""
             read -rp "  Press Enter to return to menu..." _dummy
             ;;
