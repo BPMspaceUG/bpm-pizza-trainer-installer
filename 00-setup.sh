@@ -74,8 +74,6 @@ done
 # prompt_url=1 means ask for URL at runtime if not cloned (e.g. pizza-ml)
 REPOS=(
     "https://github.com/BPMspaceUG/bpm-CodingAgentConfigCopy|$LEARNING_DIR/bpm-CodingAgentConfigCopy|1||0"
-    "https://github.com/BPMspaceUG/voice-web-exercise|$LEARNING_DIR/voice-web-exercise|0||0"
-    "https://github.com/BPMspaceUG/voice-agent-exercise|$LEARNING_DIR/voice-agent-exercise|0||0"
     "https://github.com/BPMspaceUG/bpm-pizza-ml|$LEARNING_DIR/pizza-ml|0|03-setup-pizza-ml-trainer.sh|0"
 )
 
@@ -197,7 +195,6 @@ PACKAGE_DEFS=(
     "Microsoft.VisualStudioCode|code|VS Code|special:vscode|cask:visual-studio-code"
     "Tailscale.Tailscale|tailscale|Tailscale|special:tailscale|cask:tailscale"
     "Docker.DockerDesktop|docker|Docker Desktop|special:docker|cask:docker"
-    "Ollama.Ollama|ollama|Ollama|special:ollama|cask:ollama"
     "Microsoft.PowerShell|pwsh|PowerShell|special:powershell|cask:powershell"
     "Anthropic.ClaudeCode|claude|Claude Code (CLI)|npm:@anthropic-ai/claude-code|npm:@anthropic-ai/claude-code"
     "OpenAI.Codex|codex|OpenAI Codex (CLI)|npm:@openai/codex|npm:@openai/codex"
@@ -292,15 +289,6 @@ install_docker() {
     fi
     sudo usermod -aG docker "$USER" 2>/dev/null || true
     log_info "You may need to log out and back in for docker group to take effect."
-}
-
-install_ollama() {
-    if [[ "$PLATFORM" == "macos" ]]; then
-        brew_install cask ollama
-        return
-    fi
-    log_info "Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh
 }
 
 install_powershell() {
@@ -528,7 +516,6 @@ do_install_package() {
         special:vscode)     install_vscode ;;
         special:tailscale)  install_tailscale ;;
         special:docker)     install_docker ;;
-        special:ollama)     install_ollama ;;
         special:powershell) install_powershell ;;
         special:chrome)     install_chrome ;;
         npm:*)

@@ -259,6 +259,24 @@ pizza-trainer trainer --root .. --snapshot 20260403-214500
 - Linux, WSL2, macOS — shell flow
 - `01-setup-wsl-ssh.ps1` is Windows-only and requires Administrator rights
 
+## Administrator rights
+
+The `pizza-trainer` executable does **not** need to be run as Administrator. It does not
+elevate itself, and every command works as a normal user except one:
+
+| Command / script | Elevation |
+| --- | --- |
+| `pizza-trainer` (all other commands) | Normal user |
+| `pizza-trainer wsl-ssh` → `01-setup-wsl-ssh.ps1` | **Administrator required** |
+| `00-setup.ps1` / `02-setup-coding-agents.ps1` | Normal user |
+| `03-setup-pizza-ml-trainer.ps1` | Normal user |
+
+`01-setup-wsl-ssh.ps1` declares `#Requires -RunAsAdministrator`, so it fails immediately
+without elevation — it enables WSL features, installs OpenSSH Server, and opens a
+firewall port. Launch an elevated PowerShell for that step only. `00-preflight.ps1`
+reports whether the current session is elevated, and the GUI skips script 01 when it is
+not.
+
 ## Security notes
 
 These behaviors are acceptable only in a controlled training environment:

@@ -66,8 +66,6 @@ $PreflightPs1 = Join-Path $ScriptDir '00-preflight.ps1'
 
 $Repos = @(
     @{ Url = 'https://github.com/BPMspaceUG/bpm-CodingAgentConfigCopy'; Dir = "$LearningDir\bpm-CodingAgentConfigCopy"; RunInstallSh = $true;  SetupScript = '';                              PromptUrl = $false },
-    @{ Url = 'https://github.com/BPMspaceUG/voice-web-exercise';        Dir = "$LearningDir\voice-web-exercise";        RunInstallSh = $false; SetupScript = '';                              PromptUrl = $false },
-    @{ Url = 'https://github.com/BPMspaceUG/voice-agent-exercise';      Dir = "$LearningDir\voice-agent-exercise";      RunInstallSh = $false; SetupScript = '';                              PromptUrl = $false },
     @{ Url = 'https://github.com/BPMspaceUG/bpm-pizza-ml';                Dir = "$LearningDir\pizza-ml";                  RunInstallSh = $false; SetupScript = '03-setup-pizza-ml-trainer.ps1'; PromptUrl = $false }
 )
 

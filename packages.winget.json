@@ -10,7 +10,6 @@
         { "PackageIdentifier": "Microsoft.VisualStudioCode" },
         { "PackageIdentifier": "Tailscale.Tailscale" },
         { "PackageIdentifier": "Docker.DockerDesktop" },
-        { "PackageIdentifier": "Ollama.Ollama" },
         { "PackageIdentifier": "Git.Git" },
         { "PackageIdentifier": "Python.Python.3.12" },
         { "PackageIdentifier": "OpenJS.NodeJS.LTS" },
