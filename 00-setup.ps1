@@ -491,20 +491,35 @@ env_key = "OPENROUTER_API_KEY"
     }
 }
 
-function Set-OpenRouterAgents {
+# Full key lifecycle: check it exists -> validate it -> if absent OR rejected,
+# say so plainly and prompt for a paste -> persist it. Absent and expired are
+# deliberately handled the same way from the trainee's point of view.
+# On success sets $script:OpenRouterKeyResolved and returns $true.
+$script:OpenRouterKeyResolved = $null
+$script:OpenRouterKeyIsNew    = $false
+
+function Resolve-OpenRouterKey {
     param([switch]$DryRun)
 
-    Write-Step 'Configuring coding agents via OpenRouter'
+    $script:OpenRouterKeyResolved = $null
+    $script:OpenRouterKeyIsNew    = $false
 
     $key = $env:OPENROUTER_API_KEY
     if ($key) {
-        Write-Info 'Found an OpenRouter key in the environment - validating...'
-        if (-not (Test-OpenRouterKey -Key $key)) {
-            Write-Warn 'The existing key is no longer valid.'
-            $key = $null
+        Write-Info 'Found an OpenRouter key - validating...'
+        if (Test-OpenRouterKey -Key $key) {
+            $script:OpenRouterKeyResolved = $key
+            return $true
         }
+        Write-Warn 'That key is no longer valid (expired or revoked) - a new one is needed.'
+        $key = $null
     } else {
-        Write-Info 'No OpenRouter key found in the environment.'
+        Write-Warn 'No OpenRouter key found - a new one is needed.'
+    }
+
+    if ($DryRun) {
+        Write-Info '[dry-run] would prompt for a new OpenRouter key and save it'
+        return $false
     }
 
     while (-not $key) {
@@ -518,16 +533,11 @@ function Set-OpenRouterAgents {
             $entered = Read-Host '  Paste your OpenRouter API key (blank to skip)'
         }
         if ([string]::IsNullOrWhiteSpace($entered)) {
-            Write-Warn 'Skipped - coding agents left unconfigured.'
-            return
+            Write-Warn 'No key entered - coding agents left unconfigured.'
+            return $false
         }
         if (Test-OpenRouterKey -Key $entered) { $key = $entered }
         else { Write-Warn 'That key did not work - try again, or press Enter to skip.' }
-    }
-
-    if ($DryRun) {
-        Write-Info "[dry-run] would configure Claude Code ($OpenRouterClaudeModel) and Codex ($OpenRouterCodexModel)"
-        return
     }
 
     # Codex reads the key via env_key, so it must exist in the user environment.
@@ -535,7 +545,24 @@ function Set-OpenRouterAgents {
     $env:OPENROUTER_API_KEY = $key
     Write-Ok 'Key saved to the user environment (open a new terminal to pick it up).'
 
-    Set-OpenRouterClaudeConfig -Key $key
+    $script:OpenRouterKeyResolved = $key
+    $script:OpenRouterKeyIsNew    = $true
+    return $true
+}
+
+function Set-OpenRouterAgents {
+    param([switch]$DryRun)
+
+    Write-Step 'Configuring coding agents via OpenRouter'
+
+    if (-not (Resolve-OpenRouterKey -DryRun:$DryRun)) { return }
+
+    if ($DryRun) {
+        Write-Info "[dry-run] would configure Claude Code ($OpenRouterClaudeModel) and Codex ($OpenRouterCodexModel)"
+        return
+    }
+
+    Set-OpenRouterClaudeConfig -Key $script:OpenRouterKeyResolved
     Set-OpenRouterCodexConfig
 }
 
@@ -595,14 +622,16 @@ function Update-Packages {
     Write-Host ""
     Write-Info "Update pass complete: $updated updated, $skipped skipped."
 
-    # The OpenRouter balance check runs on update too, so a trainee finds out
-    # their credit ran dry here rather than mid-exercise.
-    if ($env:OPENROUTER_API_KEY) {
-        Write-Host ""
-        Write-Step 'Checking OpenRouter balance'
-        if (-not (Test-OpenRouterKey -Key $env:OPENROUTER_API_KEY)) {
-            Write-Warn 'OpenRouter key is missing or invalid - re-run option [7] to fix.'
-        }
+    # The whole key lifecycle runs on update too — not just a balance read.
+    # A trainee whose key is absent or expired gets the paste prompt here,
+    # rather than discovering the problem mid-exercise.
+    Write-Host ""
+    Write-Step 'Checking OpenRouter key and balance'
+    if ((Resolve-OpenRouterKey -DryRun:$DryRun) -and $script:OpenRouterKeyIsNew) {
+        # Only rewrite the agent configs when the key actually changed —
+        # rewriting on every update would repeatedly clobber config.toml.
+        Set-OpenRouterClaudeConfig -Key $script:OpenRouterKeyResolved
+        Set-OpenRouterCodexConfig
     }
 }
 

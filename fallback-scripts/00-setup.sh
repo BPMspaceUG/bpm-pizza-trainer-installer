@@ -671,13 +671,16 @@ update_packages() {
     echo ""
     log_info "Update pass complete: $updated updated, $skipped skipped (not installed, unavailable, or Windows-managed)."
 
-    # The OpenRouter balance check runs on update too, so a trainee finds out
-    # their credit ran dry here rather than mid-exercise.
-    if [ -n "${OPENROUTER_API_KEY:-}" ]; then
-        echo ""
-        log_step "Checking OpenRouter balance"
-        openrouter_check_key "$OPENROUTER_API_KEY" || \
-            log_warn "OpenRouter key is missing or invalid — re-run option [7] to fix."
+    # The whole key lifecycle runs on update too — not just a balance read.
+    # A trainee whose key is absent or expired gets the paste prompt here,
+    # rather than discovering the problem mid-exercise.
+    echo ""
+    log_step "Checking OpenRouter key and balance"
+    if openrouter_ensure_key && [ "$OPENROUTER_KEY_IS_NEW" -eq 1 ]; then
+        # Only rewrite the agent configs when the key actually changed —
+        # rewriting on every update would repeatedly clobber config.toml.
+        openrouter_configure_claude "$OPENROUTER_KEY_RESOLVED"
+        openrouter_configure_codex
     fi
 }
 
@@ -825,39 +828,60 @@ EOF
     log_ok "Codex configured ($OPENROUTER_CODEX_MODEL)."
 }
 
-setup_openrouter_agents() {
-    log_step "Configuring coding agents via OpenRouter"
-
+# Full key lifecycle: check it exists -> validate it -> if absent OR rejected,
+# say so plainly and prompt for a paste -> persist it. Absent and expired are
+# deliberately handled the same way from the trainee's point of view.
+# On success sets OPENROUTER_KEY_RESOLVED and returns 0.
+OPENROUTER_KEY_RESOLVED=""
+OPENROUTER_KEY_IS_NEW=0
+openrouter_ensure_key() {
+    OPENROUTER_KEY_RESOLVED=""
+    OPENROUTER_KEY_IS_NEW=0
     local key="${OPENROUTER_API_KEY:-}"
 
     if [ -n "$key" ]; then
-        log_info "Found an OpenRouter key in the environment — validating..."
-        if ! openrouter_check_key "$key"; then
-            log_warn "The existing key is no longer valid."
-            key=""
+        log_info "Found an OpenRouter key — validating..."
+        if openrouter_check_key "$key"; then
+            OPENROUTER_KEY_RESOLVED="$key"
+            return 0
         fi
+        log_warn "That key is no longer valid (expired or revoked) — a new one is needed."
     else
-        log_info "No OpenRouter key found in the environment."
+        log_warn "No OpenRouter key found — a new one is needed."
     fi
 
-    if [ -z "$key" ]; then
-        if [ "$NONINTERACTIVE" -eq 1 ]; then
-            record_failure "No valid OpenRouter key and running non-interactively — skipping agent config."
-            return 1
-        fi
-        key="$(openrouter_prompt_key)" || {
-            log_warn "Skipped — coding agents left unconfigured."
-            return 1
-        }
+    if [ "$DRY_RUN" = "1" ]; then
+        log_info "[dry-run] would prompt for a new OpenRouter key and save it"
+        return 1
     fi
+
+    if [ "$NONINTERACTIVE" -eq 1 ]; then
+        record_failure "No valid OpenRouter key (running non-interactively — cannot prompt for one)."
+        return 1
+    fi
+
+    key="$(openrouter_prompt_key)" || {
+        log_warn "No key entered — coding agents left unconfigured."
+        return 1
+    }
+
+    openrouter_persist_key "$key"
+    OPENROUTER_KEY_RESOLVED="$key"
+    OPENROUTER_KEY_IS_NEW=1
+    return 0
+}
+
+setup_openrouter_agents() {
+    log_step "Configuring coding agents via OpenRouter"
+
+    openrouter_ensure_key || return 1
 
     if [ "$DRY_RUN" = "1" ]; then
         log_info "[dry-run] would configure Claude Code ($OPENROUTER_CLAUDE_MODEL) and Codex ($OPENROUTER_CODEX_MODEL)"
         return 0
     fi
 
-    openrouter_persist_key "$key"
-    openrouter_configure_claude "$key"
+    openrouter_configure_claude "$OPENROUTER_KEY_RESOLVED"
     openrouter_configure_codex
 }
 
