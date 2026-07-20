@@ -71,6 +71,7 @@ $Repos = @(
 
 # Script-scoped GUI delegates — set by Start-GuiMode so Sync-Repos can show dialogs
 $script:GuiPromptUrl      = $null   # scriptblock(repoName) -> url string
+$script:GuiPromptSecret   = $null   # scriptblock(label) -> secret string (masked input)
 $script:GuiRunSetupScript = $null   # scriptblock(scriptPath) -> void
 
 # ─────────────────────────────────────────────────────────────
@@ -507,9 +508,15 @@ function Set-OpenRouterAgents {
     }
 
     while (-not $key) {
-        Write-Host ''
-        Write-Host '  Get a key at https://openrouter.ai/keys' -ForegroundColor Cyan
-        $entered = Read-Host '  Paste your OpenRouter API key (blank to skip)'
+        if ($script:GuiPromptSecret) {
+            # In GUI mode a console Read-Host would block on a window the user
+            # may not even be looking at — use the dialog delegate instead.
+            $entered = & $script:GuiPromptSecret 'OpenRouter API key (get one at https://openrouter.ai/keys)'
+        } else {
+            Write-Host ''
+            Write-Host '  Get a key at https://openrouter.ai/keys' -ForegroundColor Cyan
+            $entered = Read-Host '  Paste your OpenRouter API key (blank to skip)'
+        }
         if ([string]::IsNullOrWhiteSpace($entered)) {
             Write-Warn 'Skipped - coding agents left unconfigured.'
             return
@@ -1011,7 +1018,7 @@ function Start-GuiMode {
 
     $form = New-Object System.Windows.Forms.Form
     $form.Text            = 'Pizza Trainer - Environment Setup'
-    $form.ClientSize      = New-Object System.Drawing.Size($FW, 920)
+    $form.ClientSize      = New-Object System.Drawing.Size($FW, 956)
     $form.StartPosition   = 'CenterScreen'
     $form.FormBorderStyle = 'FixedSingle'
     $form.MaximizeBox     = $false
@@ -1064,6 +1071,12 @@ function Start-GuiMode {
     $btnInstSel.ForeColor = [System.Drawing.Color]::White
     $btnInstSel.FlatStyle = 'Flat'
     $grpPkg.Controls.Add($btnInstSel)
+
+    $btnUpdateAll = New-Object System.Windows.Forms.Button
+    $btnUpdateAll.Text     = 'Update All'
+    $btnUpdateAll.Location = New-Object System.Drawing.Point(($BTNW*3 + 26), 268)
+    $btnUpdateAll.Size     = New-Object System.Drawing.Size($BTNW, $BTNH)
+    $grpPkg.Controls.Add($btnUpdateAll)
 
     # ── Repos GroupBox ────────────────────────────────────────
     $grpRepo = New-Object System.Windows.Forms.GroupBox
@@ -1121,7 +1134,7 @@ function Start-GuiMode {
     $grpScripts = New-Object System.Windows.Forms.GroupBox
     $grpScripts.Text     = 'Setup Scripts'
     $grpScripts.Location = New-Object System.Drawing.Point($PAD, 594)
-    $grpScripts.Size     = New-Object System.Drawing.Size(($FW - $PAD*2), 78)
+    $grpScripts.Size     = New-Object System.Drawing.Size(($FW - $PAD*2), 114)
     $form.Controls.Add($grpScripts)
 
     $BW4 = [int](($FW - $PAD*2 - 16 - 30) / 4)   # width of each of the 4 script buttons
@@ -1154,10 +1167,17 @@ function Start-GuiMode {
     $btnS03.FlatStyle = 'Flat'
     $grpScripts.Controls.Add($btnS03)
 
+    # Row 2 — agent configuration (not a numbered setup script)
+    $btnAgents = New-Object System.Windows.Forms.Button
+    $btnAgents.Text     = 'Coding Agents (OpenRouter)'
+    $btnAgents.Location = New-Object System.Drawing.Point(8, 58)
+    $btnAgents.Size     = New-Object System.Drawing.Size((($BW4*2) + 8), 30)
+    $grpScripts.Controls.Add($btnAgents)
+
     # ── Log GroupBox ─────────────────────────────────────────
     $grpLog = New-Object System.Windows.Forms.GroupBox
     $grpLog.Text     = 'Log'
-    $grpLog.Location = New-Object System.Drawing.Point($PAD, 682)
+    $grpLog.Location = New-Object System.Drawing.Point($PAD, 718)
     $grpLog.Size     = New-Object System.Drawing.Size(($FW - $PAD*2), 228)
     $form.Controls.Add($grpLog)
 
@@ -1189,6 +1209,21 @@ function Start-GuiMode {
         $bOk = New-Object System.Windows.Forms.Button; $bOk.Text = 'OK'; $bOk.Location = New-Object System.Drawing.Point(12, 68); $bOk.Size = New-Object System.Drawing.Size(80, 26); $bOk.DialogResult = 'OK'; $dlgUrl.AcceptButton = $bOk; $dlgUrl.Controls.Add($bOk)
         $bCl = New-Object System.Windows.Forms.Button; $bCl.Text = 'Skip'; $bCl.Location = New-Object System.Drawing.Point(102, 68); $bCl.Size = New-Object System.Drawing.Size(80, 26); $bCl.DialogResult = 'Cancel'; $dlgUrl.Controls.Add($bCl)
         if ($dlgUrl.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { return $txt.Text.Trim() }
+        return ''
+    }
+
+    # Delegate: masked secret prompt (API keys must not echo on screen)
+    $script:GuiPromptSecret = {
+        param([string]$Label)
+        $dlgKey = New-Object System.Windows.Forms.Form
+        $dlgKey.Text = 'API key'
+        $dlgKey.ClientSize = New-Object System.Drawing.Size(460, 110)
+        $dlgKey.StartPosition = 'CenterParent'; $dlgKey.FormBorderStyle = 'FixedDialog'; $dlgKey.MaximizeBox = $false
+        $lblK = New-Object System.Windows.Forms.Label; $lblK.Text = "$Label`n(leave blank to skip):"; $lblK.AutoSize = $true; $lblK.Location = New-Object System.Drawing.Point(12, 10); $dlgKey.Controls.Add($lblK)
+        $txtK = New-Object System.Windows.Forms.TextBox; $txtK.Location = New-Object System.Drawing.Point(12, 46); $txtK.Size = New-Object System.Drawing.Size(430, 23); $txtK.UseSystemPasswordChar = $true; $dlgKey.Controls.Add($txtK)
+        $bOkK = New-Object System.Windows.Forms.Button; $bOkK.Text = 'OK'; $bOkK.Location = New-Object System.Drawing.Point(12, 76); $bOkK.Size = New-Object System.Drawing.Size(80, 26); $bOkK.DialogResult = 'OK'; $dlgKey.AcceptButton = $bOkK; $dlgKey.Controls.Add($bOkK)
+        $bClK = New-Object System.Windows.Forms.Button; $bClK.Text = 'Skip'; $bClK.Location = New-Object System.Drawing.Point(102, 76); $bClK.Size = New-Object System.Drawing.Size(80, 26); $bClK.DialogResult = 'Cancel'; $dlgKey.Controls.Add($bClK)
+        if ($dlgKey.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) { return $txtK.Text.Trim() }
         return ''
     }
 
@@ -1326,6 +1361,22 @@ function Start-GuiMode {
         $btnRefresh.Enabled = $true
     })
 
+    $btnUpdateAll.Add_Click({
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            'Update all installed packages from the manifest?', 'Update Packages', 'YesNo', 'Question')
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        Reset-RunFailures
+        $btnUpdateAll.Enabled = $false
+        $btnRefresh.Enabled   = $false
+        GuiLog "`r`n==> Updating installed packages..."
+        Update-Packages -StatusMap (Get-PackageStatus)
+        GuiLog "Done. Refreshing..."
+        Refresh-PackageList
+        [void](Show-RunSummary -Label 'Package update')
+        $btnUpdateAll.Enabled = $true
+        $btnRefresh.Enabled   = $true
+    })
+
     # ── Button: Clone/Update Selected ────────────────────────
     $btnClone.Add_Click({
         Reset-RunFailures
@@ -1442,6 +1493,19 @@ function Start-GuiMode {
             }
             $btnS02.Enabled = $true
         }
+    })
+
+    # ── Button: Coding agents via OpenRouter ─────────────────
+    $btnAgents.Add_Click({
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            'Configure Claude Code and Codex to use OpenRouter?', 'Coding Agents', 'YesNo', 'Question')
+        if ($r -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        Reset-RunFailures
+        $btnAgents.Enabled = $false
+        GuiLog "`r`n==> Configuring coding agents via OpenRouter..."
+        Set-OpenRouterAgents
+        [void](Show-RunSummary -Label 'Coding agent setup')
+        $btnAgents.Enabled = $true
     })
 
     # ── Button: Script 02b (CAC CLI) ─────────────────────────
